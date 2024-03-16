@@ -87,17 +87,19 @@ class LazyTestService {
 
     $pool = new Pool($client, $promises(), [
       'concurrency' => 100,
-      'fulfilled' => function ($response, $url) use (&$errors, $output) {
-        $statusCode = $response->getStatusCode();
-        $output->writeln("Request to $url completed with status code $statusCode");
-        //        if ($statusCode >= 500) {
-          // Please fix the url value here.
-//          $errors[] = ['url' => $url, 'code' => $statusCode, 'log_message' => ''];
-//        }
+      'fulfilled' => function ($response, $index) use (&$errors, $output, $urls) {
+        $url = $urls[$index];
+        $code = $response->getStatusCode();
+        $output->writeln("$code - $url");
+        if ($code >= 500) {
+          $errors[] = ['url' => $url, 'code' => $code];
+        }
       },
       'rejected' => function ($reason, $url) use (&$errors, $output) {
-        $errors[] = ['url' => (string) $reason->getRequest()->getUri(), 'code' => $reason->getCode()];
-        $output->writeln("Request to $url failed with status code " . $reason->getCode());
+        $url = (string) $reason->getRequest()->getUri();
+        $code = $reason->getCode();
+        $errors[] = ['url' => $url, 'code' => $code];
+        $output->writeln("$code - $url");
       },
     ]);
 
