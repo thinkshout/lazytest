@@ -7,3 +7,4 @@ ToDo:
 - Add configuration screen where you can enable different plugins etc.
 - Consider sitemap and menus for url sources.
 - Should I cache bust by clearing all cache at the start of the run or by including url parameters? Which is more reliable/faster?
+- Add javascript console errors. Would have to use a headless browser like Puppeteer, Playwright or https://github.com/chrome-php/chrome. We should test speed and see if it makes sense to move our current url get logic over.

@@ -19,13 +19,15 @@ class LazyTestService {
   }
 
   public function getAllURLs() {
+    $output = new ConsoleOutput();
+    $output->writeln("Creating list of urls");
     $allURLs = [];
     $definitions = $this->urlProviderManager->getDefinitions();
     foreach ($definitions as $definition) {
-      if ($definition["id"] == 'menu_url_provider') {
+//      if ($definition["id"] == 'menu_url_provider') {
         $instance = $this->urlProviderManager->createInstance($definition['id']);
         $allURLs = array_merge($allURLs, $instance->getURLs());
-      }
+//      }
     }
     return $allURLs;
   }
@@ -37,13 +39,20 @@ class LazyTestService {
 
     $output = new ConsoleOutput();
 
-    // override url for debugging.
+    $output->writeln("checking " . count($urls) . " urls");
+
+    // Override url for debugging.
 //    $urls = [];
 //    $urls[] = "";
 
     $client = new Client([
       'base_uri' => 'http://web.lvhn.localhost/',
       'verify' => false, // Ignore SSL certificate errors
+      'defaults' => [
+        'headers' => [
+          'Connection' => 'keep-alive',
+        ],
+      ],
     ]);
     $jar = new CookieJar;
 
@@ -77,13 +86,13 @@ class LazyTestService {
     $promises = function () use ($urls, $client, $session_cookie) {
       foreach ($urls as $url) {
         yield function() use ($client, $url, $session_cookie) {
-          return $client->getAsync($url, [
+          return $client->requestAsync('HEAD', $url, [
             'headers' => [
               'Cookie' => $session_cookie,
             ],
             'timeout' => 600, // 10 minute timeout.
             'allow_redirects' => [
-              'max' => 20, // follow up to 10 redirects
+              'max' => 20, // follow up to x redirects
               'strict' => false, // use strict RFC compliant redirects
               'referer' => true, // add a Referer header
               'protocols' => ['http', 'https'], // restrict redirects to 'http' and 'https'
@@ -94,7 +103,7 @@ class LazyTestService {
     };
 
     $pool = new Pool($client, $promises(), [
-      'concurrency' => 10,
+      'concurrency' => 8,
       'fulfilled' => function ($response, $index) use ($output, $urls, $startTimestamp) {
         $code = $response->getStatusCode();
         // Not sure why this is sometimes unknown since we always start with a url.
@@ -106,7 +115,7 @@ class LazyTestService {
         }
         else {
           // Success
-//          $output->writeln("$code;$url");
+          // $output->writeln("$code;$url");
         }
       },
       'rejected' => function ($reason) use ($output, $startTimestamp) {
