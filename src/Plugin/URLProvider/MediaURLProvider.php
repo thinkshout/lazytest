@@ -27,28 +27,40 @@ class MediaURLProvider extends URLProviderBase {
       ->getStorage('media_type')
       ->loadMultiple();
 
+    // Get oldest and newest.
+    $sorts = [
+      'DESC',
+      'ASC',
+    ];
+
     foreach ($media_types as $media_type) {
-      // Get media type id.
-      $media_type_id = $media_type->id();
 
-      // Query for up to 10 random media entities of the media type.
-      $media_ids = $media_storage->getQuery()
-        ->accessCheck(FALSE)
-        ->condition('bundle', $media_type_id)
-        ->range(0, 10)
-        ->addTag('sort_by_random')
-        ->execute();
+      foreach ($sorts as $sort) {
 
-      // Load the media entities.
-      $media_entities = $media_storage->loadMultiple($media_ids);
+        // Get media type id.
+        $media_type_id = $media_type->id();
 
-      // Generate URLs for each media entity.
-      foreach ($media_entities as $media_entity) {
-        $url_object = Url::fromRoute('entity.media.canonical', ['media' => $media_entity->id()]);
-        $url_object->setAbsolute();
-        $url = $url_object->toString();
-        $urls[] = $url;
+        // Query for up to 10 random media entities of the media type.
+        $media_ids = $media_storage->getQuery()
+          ->accessCheck(FALSE)
+          ->condition('bundle', $media_type_id)
+          ->sort('mid', $sort)
+          ->range(0, 10)
+          ->execute();
+
+        // Load the media entities.
+        $media_entities = $media_storage->loadMultiple($media_ids);
+
+        // Generate URLs for each media entity.
+        foreach ($media_entities as $media_entity) {
+          $url_object = Url::fromRoute('entity.media.canonical', ['media' => $media_entity->id()]);
+          $url_object->setAbsolute();
+          $url = $url_object->toString();
+          $urls[] = $url;
+        }
+
       }
+
 
     }
 

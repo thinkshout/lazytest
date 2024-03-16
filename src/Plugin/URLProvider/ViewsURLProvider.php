@@ -26,7 +26,6 @@ class ViewsURLProvider extends URLProviderBase {
     $view_ids = $view_storage->getQuery()
       ->accessCheck(FALSE)
       ->condition('status', 1)
-//      ->range(0, 10)
       ->execute();
 
     // Load the view entities.

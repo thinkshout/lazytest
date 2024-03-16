@@ -22,23 +22,34 @@ class FileURLProvider extends URLProviderBase {
     // Get the file storage service.
     $file_storage = \Drupal::entityTypeManager()->getStorage('file');
 
-    // Query for up to 10 random file entities.
-    $file_ids = $file_storage->getQuery()
-      ->accessCheck(FALSE)
-      ->range(0, 10)
-      ->addTag('sort_by_random')
-      ->execute();
+    // Get oldest and newest.
+    $sorts = [
+      'DESC',
+      'ASC',
+    ];
 
-    // Load the file entities.
-    $files = $file_storage->loadMultiple($file_ids);
+    foreach ($sorts as $sort) {
 
-    // Generate URLs for each file entity.
-    foreach ($files as $file) {
-      $stream_wrapper_manager = \Drupal::service('stream_wrapper_manager');
-      $file_uri = $file->getFileUri();
-      $url = $stream_wrapper_manager->getViaUri($file_uri)->getExternalUrl();
-      $urls[] = $url;
+      // Query for up to 10 random file entities.
+      $file_ids = $file_storage->getQuery()
+        ->accessCheck(FALSE)
+        ->sort('fid', $sort)
+        ->range(0, 10)
+        ->execute();
+
+      // Load the file entities.
+      $files = $file_storage->loadMultiple($file_ids);
+
+      // Generate URLs for each file entity.
+      foreach ($files as $file) {
+        $stream_wrapper_manager = \Drupal::service('stream_wrapper_manager');
+        $file_uri = $file->getFileUri();
+        $url = $stream_wrapper_manager->getViaUri($file_uri)->getExternalUrl();
+        $urls[] = $url;
+      }
     }
+
+
 
     return $urls;
   }

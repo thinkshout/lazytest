@@ -20,20 +20,30 @@ class ContentTypeURLProvider extends URLProviderBase {
     $urls = [];
     $nodeTypes = \Drupal::entityTypeManager()->getStorage('node_type')->loadMultiple();
 
-    foreach ($nodeTypes as $nodeType) {
-      $nids = \Drupal::entityTypeManager()->getStorage('node')->getQuery()
-        ->accessCheck(FALSE)
-        ->condition('status', 1)
-        ->condition('type', $nodeType->id())
-        ->range(0, 10)
-        ->addTag('sort_by_random')
-        ->execute();
+    // Get oldest and newest.
+    $sorts = [
+      'DESC',
+      'ASC',
+    ];
 
-      foreach ($nids as $nid) {
-        $url_object = Url::fromRoute('entity.node.canonical', ['node' => $nid]);
-        $url_object->setAbsolute();
-        $urls[] = $url_object->toString();
+    foreach ($nodeTypes as $nodeType) {
+
+      foreach ($sorts as $sort) {
+        $nids = \Drupal::entityTypeManager()->getStorage('node')->getQuery()
+          ->accessCheck(FALSE)
+          ->condition('status', 1)
+          ->condition('type', $nodeType->id())
+          ->sort('nid', $sort)
+          ->range(0, 10)
+          ->execute();
+
+        foreach ($nids as $nid) {
+          $url_object = Url::fromRoute('entity.node.canonical', ['node' => $nid]);
+          $url_object->setAbsolute();
+          $urls[] = $url_object->toString();
+        }
       }
+
     }
 
     return $urls;
