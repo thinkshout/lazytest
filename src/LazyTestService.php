@@ -39,6 +39,8 @@ class LazyTestService {
 
     $output = new ConsoleOutput();
 
+    $messages = [];
+
     $output->writeln("checking " . count($urls) . " urls");
 
     // Override url for debugging.
@@ -86,7 +88,7 @@ class LazyTestService {
     $promises = function () use ($urls, $client, $session_cookie) {
       foreach ($urls as $url) {
         yield function() use ($client, $url, $session_cookie) {
-          return $client->requestAsync('HEAD', $url, [
+          return $client->requestAsync('HEAD', $url["url"], [
             'headers' => [
               'Cookie' => $session_cookie,
             ],
@@ -104,25 +106,41 @@ class LazyTestService {
 
     $pool = new Pool($client, $promises(), [
       'concurrency' => 8,
-      'fulfilled' => function ($response, $index) use ($output, $urls, $startTimestamp) {
+      'fulfilled' => function ($response, $index) use ($output, $urls, $startTimestamp, &$messages) {
         $code = $response->getStatusCode();
         // Not sure why this is sometimes unknown since we always start with a url.
         // Seems to only happen with successful items.
-        $url = $urls[$index] ?? 'unknown';
+        $url = $urls[$index]["url"] ?? 'unknown';
+        $source = $urls[$index]["source"] ?? 'unknown';
         $log_messages = $this->getLogMessages($url, $startTimestamp);
         if (!empty($log_messages) || $code >= 500) {
-          $output->writeln("$code;$url;$log_messages");
+          $message = [
+            'source' => $source,
+            'code' => $code,
+            'url' => $url,
+            'message' => $log_messages,
+          ];
+          $messages[] = $message;
+          $output->writeln($message);
         }
         else {
           // Success
-          // $output->writeln("$code;$url");
+          $output->writeln("$code;$url");
         }
       },
-      'rejected' => function ($reason) use ($output, $startTimestamp) {
+      'rejected' => function ($reason, $index) use ($output, $urls, $startTimestamp, &$messages) {
         $code = $reason->getCode();
         $url = (string) $reason->getRequest()->getUri();
+        $source = $urls[$index]["source"] ?? 'unknown';
         $log_messages = $this->getLogMessages($url, $startTimestamp);
-        $output->writeln("$code;$url;$log_messages");
+        $message = [
+          'source' => $source,
+          'code' => $code,
+          'url' => $url,
+          'message' => $log_messages,
+        ];
+        $messages[] = $message;
+        $output->writeln($message);
       },
     ]);
 
@@ -134,6 +152,7 @@ class LazyTestService {
 
     // End the session when you're done
     \Drupal::service('session_manager')->destroy();
+
   }
 
   public function getLogMessages($url, $startTimestamp) {
@@ -146,7 +165,10 @@ class LazyTestService {
     $result = $query->execute()->fetchAll();
     $log_messages = [];
     foreach ($result as $record) {
-      $log_messages[] = $record->type . '-' . (string) t($record->message, unserialize($record->variables));
+      $message = str_replace('@backtrace_string', '', $record->message);
+      $message_compiled = $record->type . '-' . (string) t($message, unserialize($record->variables));
+      $message_compiled = strip_tags($message_compiled);
+      $log_messages[] = $message_compiled;
     }
 
     return implode("|", $log_messages);

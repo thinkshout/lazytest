@@ -75,7 +75,11 @@ class RouteURLProvider extends URLProviderBase {
 
         $url_object = Url::fromRoute($route_name);
         $url_object->setAbsolute();
-        $urls[] = $url_object->toString();
+        $urls[] = [
+          'source' => "routes-$route_name",
+          'url' => $url_object->toString(),
+        ];
+
       } catch (\Exception $e) {
         // Not all routes will be able to be converted into URLs,
         // so we'll catch any exceptions and skip those routes.

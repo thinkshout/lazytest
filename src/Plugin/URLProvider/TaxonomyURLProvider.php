@@ -42,7 +42,11 @@ class TaxonomyURLProvider extends URLProviderBase {
         foreach ($tids as $tid) {
           $url_object = Url::fromRoute('entity.taxonomy_term.canonical', ['taxonomy_term' => $tid]);
           $url_object->setAbsolute();
-          $urls[] = $url_object->toString();
+          $vocabularyId = $vocabulary->id();
+          $urls[] = [
+            'source' => "taxonomy-$vocabularyId",
+            'url' => $url_object->toString(),
+          ];
         }
       }
 

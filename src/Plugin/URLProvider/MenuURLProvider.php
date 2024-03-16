@@ -20,9 +20,14 @@ class MenuURLProvider extends URLProviderBase {
     $menus = \Drupal::entityTypeManager()->getStorage('menu_link_content')->loadMultiple();
 
     foreach ($menus as $menu) {
-      $link = $menu->get('link')->first()->getUrl();
-      $link->setAbsolute();
-      $urls[] = $link->toString();
+      if ($menu->isEnabled()) {
+        $link = $menu->get('link')->first()->getUrl();
+        $link->setAbsolute();
+        $urls[] = [
+          'source' => "menu-" . $menu->label(),
+          'url' => $link->toString(),
+        ];
+      }
     }
 
     return $urls;

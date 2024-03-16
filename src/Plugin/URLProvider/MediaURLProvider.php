@@ -43,6 +43,7 @@ class MediaURLProvider extends URLProviderBase {
         // Query for up to 10 random media entities of the media type.
         $media_ids = $media_storage->getQuery()
           ->accessCheck(FALSE)
+          ->condition('status', 1)
           ->condition('bundle', $media_type_id)
           ->sort('mid', $sort)
           ->range(0, 10)
@@ -56,7 +57,10 @@ class MediaURLProvider extends URLProviderBase {
           $url_object = Url::fromRoute('entity.media.canonical', ['media' => $media_entity->id()]);
           $url_object->setAbsolute();
           $url = $url_object->toString();
-          $urls[] = $url;
+          $urls[] = [
+            'source' => "media-$media_type_id",
+            'url' => $url,
+          ];
         }
 
       }

@@ -46,7 +46,10 @@ class UserURLProvider extends URLProviderBase {
         // Get the user's URL.
         $url_object = $user->toUrl();
         $url_object->setAbsolute();
-        $urls[] = $url_object->toString();
+        $urls[] = [
+          'source' => "users",
+          'url' => $url_object->toString(),
+        ];
       }
     }
 

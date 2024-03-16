@@ -40,7 +40,11 @@ class ContentTypeURLProvider extends URLProviderBase {
         foreach ($nids as $nid) {
           $url_object = Url::fromRoute('entity.node.canonical', ['node' => $nid]);
           $url_object->setAbsolute();
-          $urls[] = $url_object->toString();
+          $nodeTypeId = $nodeType->id();
+          $urls[] = [
+            'source' => "content-$nodeTypeId",
+            'url' => $url_object->toString(),
+          ];
         }
       }
 

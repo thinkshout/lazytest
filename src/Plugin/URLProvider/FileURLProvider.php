@@ -33,6 +33,7 @@ class FileURLProvider extends URLProviderBase {
       // Query for up to 10 random file entities.
       $file_ids = $file_storage->getQuery()
         ->accessCheck(FALSE)
+        ->condition('status', 1)
         ->sort('fid', $sort)
         ->range(0, 10)
         ->execute();
@@ -45,7 +46,10 @@ class FileURLProvider extends URLProviderBase {
         $stream_wrapper_manager = \Drupal::service('stream_wrapper_manager');
         $file_uri = $file->getFileUri();
         $url = $stream_wrapper_manager->getViaUri($file_uri)->getExternalUrl();
-        $urls[] = $url;
+        $urls[] = [
+          'source' => "files",
+          'url' => $url,
+        ];
       }
     }
 

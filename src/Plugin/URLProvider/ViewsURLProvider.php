@@ -35,12 +35,15 @@ class ViewsURLProvider extends URLProviderBase {
     foreach ($views as $view) {
       // We only want to generate URLs for views that have a page display.
       foreach ($view->get('display') as $display) {
-        if ($display['display_plugin'] === 'page') {
+        if ($display['display_plugin'] === 'page' && (!isset($display['display_options']['enabled']) || (isset($display['display_options']['enabled']) && $display['display_options']['enabled'] !== FALSE))) {
           // The 'path' of the page display will be used as the URL.
           try {
             $url_object = Url::fromRoute('view.' . $view->id() . '.' . $display['id']);
             $url_object->setAbsolute();
-            $urls[] = $url_object->toString();
+            $urls[] = [
+              'source' => "views",
+              'url' => $url_object->toString(),
+            ];
           } catch (\Exception $e) {
             // If the route does not exist, ignore it.
           }
