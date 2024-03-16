@@ -22,10 +22,10 @@ class LazyTestService {
     $allURLs = [];
     $definitions = $this->urlProviderManager->getDefinitions();
     foreach ($definitions as $definition) {
-      if ($definition["id"] == 'content_type_url_provider') {
+//      if ($definition["id"] == 'content_type_url_provider') {
         $instance = $this->urlProviderManager->createInstance($definition['id']);
         $allURLs = array_merge($allURLs, $instance->getURLs());
-      }
+//      }
     }
     return $allURLs;
   }
@@ -96,14 +96,21 @@ class LazyTestService {
       'concurrency' => 100,
       'fulfilled' => function ($response, $index) use ($output, $urls, $startTimestamp) {
         $code = $response->getStatusCode();
-        $url = $urls[$index];
+        if (!isset($urls[$index])) {
+          // Not sure why this is sometimes unknown since we always start with a url.
+          // Seems to only happen with successful items.
+          $url = 'unknown';
+        }
+        else {
+          $url = $urls[$index];
+        }
         $log_messages = $this->getLogMessages($url, $startTimestamp);
         if (!empty($log_messages) || $code >= 500) {
           $output->writeln("$code;$url;$log_messages");
         }
         else {
           // Success
-          $output->writeln("$code;$url");
+//          $output->writeln("$code;$url");
         }
       },
       'rejected' => function ($reason) use ($output, $startTimestamp) {
