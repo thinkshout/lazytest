@@ -22,18 +22,7 @@ class LazyTestCommands extends DrushCommands {
     $urls = $this->lazyTestService->getAllURLs();
     $urls = array_filter($urls); // This removes empty values
     $urls = array_unique($urls); // This removes duplicates
-    $results = $this->lazyTestService->checkURLs($urls);
-
-    $rows = [];
-    foreach ($results as $result) {
-      $rows[] = [
-        'url' => $result['url'],
-        'code' => $result['code'],
-        'log_message' => $result['log_message']
-      ];
-    }
-
-    return new RowsOfFields($rows);
+    $this->lazyTestService->checkURLs($urls);
   }
 
 }

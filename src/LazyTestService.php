@@ -4,17 +4,11 @@ namespace Drupal\lazytest;
 
 use Drupal\Core\Url;
 use Drupal\lazytest\Plugin\URLProviderManager;
-use Drupal\Core\Database\Database;
 use Drupal\Core\Logger\RfcLogLevel;
-use GuzzleHttp\Exception\RequestException;
-use GuzzleHttp\Promise;
 use GuzzleHttp\Pool;
 use GuzzleHttp\Client;
 use GuzzleHttp\Cookie\CookieJar;
-use Drupal\Core\Logger\LoggerChannelFactoryInterface;
 use Symfony\Component\Console\Output\ConsoleOutput;
-
-
 
 class LazyTestService {
 
@@ -28,25 +22,29 @@ class LazyTestService {
     $allURLs = [];
     $definitions = $this->urlProviderManager->getDefinitions();
     foreach ($definitions as $definition) {
-      $instance = $this->urlProviderManager->createInstance($definition['id']);
-      $allURLs = array_merge($allURLs, $instance->getURLs());
+      if ($definition["id"] == 'content_type_url_provider') {
+        $instance = $this->urlProviderManager->createInstance($definition['id']);
+        $allURLs = array_merge($allURLs, $instance->getURLs());
+      }
     }
     return $allURLs;
   }
 
   public function checkURLs($urls) {
 
+    drupal_flush_all_caches();
+
     $output = new ConsoleOutput();
 
     // override url for debugging.
 //    $urls = [];
-//    $urls[] = "http://web.lvhn.localhost/admin/content";
-//    $urls[] = "http://web.lvhn.localhost/adminfoo/content";
-//    $urls[] = "http://web.lvhn.localhost/admin/structure/views/add";
+//    $urls[] = "";
 
-    $client = new Client(['base_uri' => 'http://web.lvhn.localhost/']);
+    $client = new Client([
+      'base_uri' => 'http://web.lvhn.localhost/',
+      'verify' => false, // Ignore SSL certificate errors
+    ]);
     $jar = new CookieJar;
-    $errors = [];
 
     // Create a one-time login link for user 1
     $user = \Drupal\user\Entity\User::load(1);
@@ -73,12 +71,21 @@ class LazyTestService {
       }
     }
 
+    $startTimestamp = time();
+
     $promises = function () use ($urls, $client, $session_cookie) {
       foreach ($urls as $url) {
         yield function() use ($client, $url, $session_cookie) {
           return $client->getAsync($url, [
             'headers' => [
               'Cookie' => $session_cookie,
+            ],
+            'timeout' => 600, // 10 minute timeout.
+            'allow_redirects' => [
+              'max' => 20, // follow up to 10 redirects
+              'strict' => false, // use strict RFC compliant redirects
+              'referer' => true, // add a Referer header
+              'protocols' => ['http', 'https'], // restrict redirects to 'http' and 'https'
             ],
           ]);
         };
@@ -87,19 +94,23 @@ class LazyTestService {
 
     $pool = new Pool($client, $promises(), [
       'concurrency' => 100,
-      'fulfilled' => function ($response, $index) use (&$errors, $output, $urls) {
-        $url = $urls[$index];
+      'fulfilled' => function ($response, $index) use ($output, $urls, $startTimestamp) {
         $code = $response->getStatusCode();
-        $output->writeln("$code - $url");
-        if ($code >= 500) {
-          $errors[] = ['url' => $url, 'code' => $code];
+        $url = $urls[$index];
+        $log_messages = $this->getLogMessages($url, $startTimestamp);
+        if (!empty($log_messages) || $code >= 500) {
+          $output->writeln("$code;$url;$log_messages");
+        }
+        else {
+          // Success
+          $output->writeln("$code;$url");
         }
       },
-      'rejected' => function ($reason, $url) use (&$errors, $output) {
-        $url = (string) $reason->getRequest()->getUri();
+      'rejected' => function ($reason) use ($output, $startTimestamp) {
         $code = $reason->getCode();
-        $errors[] = ['url' => $url, 'code' => $code];
-        $output->writeln("$code - $url");
+        $url = (string) $reason->getRequest()->getUri();
+        $log_messages = $this->getLogMessages($url, $startTimestamp);
+        $output->writeln("$code;$url;$log_messages");
       },
     ]);
 
@@ -111,8 +122,24 @@ class LazyTestService {
 
     // End the session when you're done
     \Drupal::service('session_manager')->destroy();
+  }
 
-    return $errors;
+  public function getLogMessages($url, $startTimestamp) {
+    $query = \Drupal::database()->select('watchdog', 'w');
+    $query->fields('w', ['message', 'variables', 'severity', 'type', 'timestamp']);
+    $query->condition('w.timestamp', $startTimestamp, '>=');
+    $query->condition('w.location', $url, '=');
+    $query->orderBy('w.wid', 'DESC');
+    $result = $query->execute()->fetchAll();
+
+    $log_messages = [];
+    foreach ($result as $record) {
+//      if ($record->severity <= RfcLogLevel::WARNING) {
+        $log_messages[] = (string) t($record->message, unserialize($record->variables));
+//      }
+    }
+
+    return implode("|", $log_messages);
   }
 
 }

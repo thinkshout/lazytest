@@ -26,6 +26,7 @@ class UserURLProvider extends URLProviderBase {
     $user_ids = $user_storage->getQuery()
       ->accessCheck(FALSE)
       ->condition('uid', 0, '>')
+      ->condition('status', 1)
       ->range(0, 10)
       ->addTag('sort_by_random')
       ->execute();

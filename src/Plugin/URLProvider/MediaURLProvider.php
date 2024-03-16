@@ -44,18 +44,9 @@ class MediaURLProvider extends URLProviderBase {
 
       // Generate URLs for each media entity.
       foreach ($media_entities as $media_entity) {
-        if ($media_type_id === 'image' && $media_entity->hasField('field_media_image') && !$media_entity->get('field_media_image')->isEmpty()) {
-          $file_uri = $media_entity->get('field_media_image')->entity->getFileUri();
-        }
-        elseif ($media_type_id === 'video' && $media_entity->hasField('field_media_video_file') && !$media_entity->get('field_media_video_file')->isEmpty()) {
-          $file_uri = $media_entity->get('field_media_video_file')->entity->getFileUri();
-        }
-        else {
-          continue;
-        }
-
-        $stream_wrapper_manager = \Drupal::service('stream_wrapper_manager');
-        $url = $stream_wrapper_manager->getViaUri($file_uri)->getExternalUrl();
+        $url_object = Url::fromRoute('entity.media.canonical', ['media' => $media_entity->id()]);
+        $url_object->setAbsolute();
+        $url = $url_object->toString();
         $urls[] = $url;
       }
 
