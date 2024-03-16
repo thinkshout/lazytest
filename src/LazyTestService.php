@@ -11,6 +11,10 @@ use GuzzleHttp\Promise;
 use GuzzleHttp\Pool;
 use GuzzleHttp\Client;
 use GuzzleHttp\Cookie\CookieJar;
+use Drupal\Core\Logger\LoggerChannelFactoryInterface;
+use Symfony\Component\Console\Output\ConsoleOutput;
+
+
 
 class LazyTestService {
 
@@ -32,10 +36,13 @@ class LazyTestService {
 
   public function checkURLs($urls) {
 
+    $output = new ConsoleOutput();
+
     // override url for debugging.
-    $urls = [];
-    $urls[] = "http://web.lvhn.localhost/admin/content";
-    $urls[] = "http://web.lvhn.localhost/adminfoo/content";
+//    $urls = [];
+//    $urls[] = "http://web.lvhn.localhost/admin/content";
+//    $urls[] = "http://web.lvhn.localhost/adminfoo/content";
+//    $urls[] = "http://web.lvhn.localhost/admin/structure/views/add";
 
     $client = new Client(['base_uri' => 'http://web.lvhn.localhost/']);
     $jar = new CookieJar;
@@ -80,17 +87,17 @@ class LazyTestService {
 
     $pool = new Pool($client, $promises(), [
       'concurrency' => 100,
-      'fulfilled' => function ($response, $url) use (&$errors) {
+      'fulfilled' => function ($response, $url) use (&$errors, $output) {
         $statusCode = $response->getStatusCode();
-        drush_print("Request to $url completed with status code $statusCode");
+        $output->writeln("Request to $url completed with status code $statusCode");
         //        if ($statusCode >= 500) {
           // Please fix the url value here.
 //          $errors[] = ['url' => $url, 'code' => $statusCode, 'log_message' => ''];
 //        }
       },
-      'rejected' => function ($reason, $url) use (&$errors) {
-        $errors[] = ['url' => (string) $reason->getRequest()->getUri(), 'code' => $reason->getCode(), 'log_message' => 'test2'];
-        drush_print("Request to $url failed with error: " . $reason->getMessage());
+      'rejected' => function ($reason, $url) use (&$errors, $output) {
+        $errors[] = ['url' => (string) $reason->getRequest()->getUri(), 'code' => $reason->getCode()];
+        $output->writeln("Request to $url failed with status code " . $reason->getCode());
       },
     ]);
 
