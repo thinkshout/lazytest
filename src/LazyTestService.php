@@ -4,7 +4,6 @@ namespace Drupal\lazytest;
 
 use Drupal\Core\Url;
 use Drupal\lazytest\Plugin\URLProviderManager;
-use Drupal\Core\Logger\RfcLogLevel;
 use GuzzleHttp\Pool;
 use GuzzleHttp\Client;
 use GuzzleHttp\Cookie\CookieJar;
@@ -90,7 +89,7 @@ class LazyTestService {
             'headers' => [
               'Cookie' => $session_cookie,
             ],
-            'timeout' => 600, // 10 minute timeout.
+            'timeout' => 120,
             'allow_redirects' => [
               'max' => 20, // follow up to x redirects
               'strict' => false, // use strict RFC compliant redirects
