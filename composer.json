@@ -1,0 +1,14 @@
+{
+    "name": "drupal/lazytest",
+    "description": "Testing for lazy people",
+    "type": "drupal-module",
+    "require": {
+        "guzzlehttp/promises": "^1.4"
+    },
+    "extra": {
+        "drupal": {
+            "version": "9.x",
+            "package": "Custom"
+        }
+    }
+}

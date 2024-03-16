@@ -1,0 +1,6 @@
+services:
+  lazytest.commands:
+    class: \Drupal\lazytest\Commands\LazyTestCommands
+    arguments: [ '@lazytest.lazy_test_service' ]
+    tags:
+      - { name: drush.command }

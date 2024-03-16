@@ -1,0 +1,8 @@
+services:
+  plugin.manager.url_provider:
+    class: Drupal\lazytest\Plugin\URLProviderManager
+    parent: default_plugin_manager
+
+  lazytest.lazy_test_service:
+    class: Drupal\lazytest\LazyTestService
+    arguments: ['@plugin.manager.url_provider']
