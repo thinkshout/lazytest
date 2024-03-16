@@ -22,16 +22,17 @@ class LazyTestService {
     $allURLs = [];
     $definitions = $this->urlProviderManager->getDefinitions();
     foreach ($definitions as $definition) {
-//      if ($definition["id"] == 'content_type_url_provider') {
+      if ($definition["id"] == 'menu_url_provider') {
         $instance = $this->urlProviderManager->createInstance($definition['id']);
         $allURLs = array_merge($allURLs, $instance->getURLs());
-//      }
+      }
     }
     return $allURLs;
   }
 
   public function checkURLs($urls) {
 
+    // We want to get fresh versions of pages.
     drupal_flush_all_caches();
 
     $output = new ConsoleOutput();
@@ -93,17 +94,12 @@ class LazyTestService {
     };
 
     $pool = new Pool($client, $promises(), [
-      'concurrency' => 100,
+      'concurrency' => 10,
       'fulfilled' => function ($response, $index) use ($output, $urls, $startTimestamp) {
         $code = $response->getStatusCode();
-        if (!isset($urls[$index])) {
-          // Not sure why this is sometimes unknown since we always start with a url.
-          // Seems to only happen with successful items.
-          $url = 'unknown';
-        }
-        else {
-          $url = $urls[$index];
-        }
+        // Not sure why this is sometimes unknown since we always start with a url.
+        // Seems to only happen with successful items.
+        $url = $urls[$index] ?? 'unknown';
         $log_messages = $this->getLogMessages($url, $startTimestamp);
         if (!empty($log_messages) || $code >= 500) {
           $output->writeln("$code;$url;$log_messages");
@@ -133,17 +129,15 @@ class LazyTestService {
 
   public function getLogMessages($url, $startTimestamp) {
     $query = \Drupal::database()->select('watchdog', 'w');
-    $query->fields('w', ['message', 'variables', 'severity', 'type', 'timestamp']);
+    $query->fields('w', ['message', 'variables', 'type', 'location']);
     $query->condition('w.timestamp', $startTimestamp, '>=');
     $query->condition('w.location', $url, '=');
+    $query->condition('w.severity', RfcLogLevel::WARNING, '>=');
     $query->orderBy('w.wid', 'DESC');
     $result = $query->execute()->fetchAll();
-
     $log_messages = [];
     foreach ($result as $record) {
-//      if ($record->severity <= RfcLogLevel::WARNING) {
-        $log_messages[] = (string) t($record->message, unserialize($record->variables));
-//      }
+      $log_messages[] = $record->type . '-' . (string) t($record->message, unserialize($record->variables));
     }
 
     return implode("|", $log_messages);

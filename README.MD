@@ -5,3 +5,5 @@ ToDo:
 - Way to include certain urls
 - Count success/fail and write at end of run.
 - Add configuration screen where you can enable different plugins etc.
+- Consider sitemap and menus for url sources.
+- Should I cache bust by clearing all cache at the start of the run or by including url parameters? Which is more reliable/faster?
