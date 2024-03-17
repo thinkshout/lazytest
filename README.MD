@@ -1,4 +1,25 @@
-ToDo:
+Goal:
+A testing tool that is easy to set up, easy to use, easy to maintain.
+
+Functionalities:
+- Implemented as a Drupal module which provides a drush command.
+- The drush command generates:
+  - CSV output which can be imported into a spreadsheet (source, status code, url, message)
+  - Error analysis (consolidated for quicker fixes)
+- Various URL Providers supply urls to test
+  - Content Types (10 old and 10 new nodes from each bundle)
+  - Files (10 old and 10 new files)
+  - Media (10 old and 10 new Media pages)
+  - Menu (all menu items)
+  - Routes (filtered list of all route urls)
+  - Taxonomy (10 old and 10 new term pages from each vocabulary)
+  - Users (10 old and 10 new users)
+  - Views (all view urls)
+  - Future ideas:
+    - Google Analytics (top 100 pages)
+    - Manual list
+
+To Do:
 - Add a way to do an initial run, show results, maybe with checkboxes for each line pre-checked, ability for future runs to exclude those urls with the same code and/or the same error message.
 - Way to exclude certain urls
 - Way to include certain urls
