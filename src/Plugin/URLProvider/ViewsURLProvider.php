@@ -42,6 +42,7 @@ class ViewsURLProvider extends URLProviderBase {
             $url_object->setAbsolute();
             $urls[] = [
               'source' => "views",
+              'subsource' => $view->id(),
               'url' => $url_object->toString(),
             ];
           } catch (\Exception $e) {

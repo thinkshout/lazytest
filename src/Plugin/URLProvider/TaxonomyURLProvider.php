@@ -44,7 +44,8 @@ class TaxonomyURLProvider extends URLProviderBase {
           $url_object->setAbsolute();
           $vocabularyId = $vocabulary->id();
           $urls[] = [
-            'source' => "taxonomy-$vocabularyId",
+            'source' => "taxonomy",
+            'subsource' => $vocabularyId,
             'url' => $url_object->toString(),
           ];
         }

@@ -76,7 +76,8 @@ class RouteURLProvider extends URLProviderBase {
         $url_object = Url::fromRoute($route_name);
         $url_object->setAbsolute();
         $urls[] = [
-          'source' => "routes-$route_name",
+          'source' => "routes",
+          'subsource' => $route_name,
           'url' => $url_object->toString(),
         ];
 

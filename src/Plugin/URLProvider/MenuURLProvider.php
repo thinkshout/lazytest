@@ -24,7 +24,8 @@ class MenuURLProvider extends URLProviderBase {
         $link = $menu->get('link')->first()->getUrl();
         $link->setAbsolute();
         $urls[] = [
-          'source' => "menu-" . $menu->label(),
+          'source' => "menu",
+          'subsource' => $menu->label(),
           'url' => $link->toString(),
         ];
       }

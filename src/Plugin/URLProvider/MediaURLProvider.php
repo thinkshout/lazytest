@@ -58,7 +58,8 @@ class MediaURLProvider extends URLProviderBase {
           $url_object->setAbsolute();
           $url = $url_object->toString();
           $urls[] = [
-            'source' => "media-$media_type_id",
+            'source' => "media",
+            'subsource' => $media_type_id,
             'url' => $url,
           ];
         }

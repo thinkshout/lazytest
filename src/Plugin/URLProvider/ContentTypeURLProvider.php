@@ -42,7 +42,8 @@ class ContentTypeURLProvider extends URLProviderBase {
           $url_object->setAbsolute();
           $nodeTypeId = $nodeType->id();
           $urls[] = [
-            'source' => "content-$nodeTypeId",
+            'source' => "content",
+            'subsource' => $nodeTypeId,
             'url' => $url_object->toString(),
           ];
         }

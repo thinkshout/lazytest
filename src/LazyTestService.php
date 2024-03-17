@@ -9,6 +9,8 @@ use GuzzleHttp\Pool;
 use GuzzleHttp\Client;
 use GuzzleHttp\Cookie\CookieJar;
 use Symfony\Component\Console\Output\ConsoleOutput;
+use Symfony\Component\Console\Helper\ProgressBar;
+
 
 class LazyTestService {
 
@@ -20,11 +22,11 @@ class LazyTestService {
 
   public function getAllURLs() {
     $output = new ConsoleOutput();
-    $output->writeln("Creating list of urls");
+    $output->writeln("Creating list of urls and starting download.");
     $allURLs = [];
     $definitions = $this->urlProviderManager->getDefinitions();
     foreach ($definitions as $definition) {
-//      if ($definition["id"] == 'menu_url_provider') {
+//      if ($definition["id"] == 'content_type_url_provider') {
         $instance = $this->urlProviderManager->createInstance($definition['id']);
         $allURLs = array_merge($allURLs, $instance->getURLs());
 //      }
@@ -38,14 +40,11 @@ class LazyTestService {
     drupal_flush_all_caches();
 
     $output = new ConsoleOutput();
+    $progressBar = new ProgressBar($output, count($urls));
+    $progressBar->start();
+    $completedRequests = 0;
 
     $messages = [];
-
-    $output->writeln("checking " . count($urls) . " urls");
-
-    // Override url for debugging.
-//    $urls = [];
-//    $urls[] = "";
 
     $client = new Client([
       'base_uri' => 'http://web.lvhn.localhost/',
@@ -106,41 +105,45 @@ class LazyTestService {
 
     $pool = new Pool($client, $promises(), [
       'concurrency' => 8,
-      'fulfilled' => function ($response, $index) use ($output, $urls, $startTimestamp, &$messages) {
+      'fulfilled' => function ($response, $index) use ($output, $urls, $startTimestamp, &$messages, &$completedRequests, $progressBar) {
         $code = $response->getStatusCode();
         // Not sure why this is sometimes unknown since we always start with a url.
         // Seems to only happen with successful items.
         $url = $urls[$index]["url"] ?? 'unknown';
         $source = $urls[$index]["source"] ?? 'unknown';
+        $subsource = $urls[$index]["subsource"] ?? 'unknown';
         $log_messages = $this->getLogMessages($url, $startTimestamp);
-        if (!empty($log_messages) || $code >= 500) {
+        if (!empty($log_messages) || $code != 200) {
           $message = [
             'source' => $source,
+            'subsource' => $subsource,
             'code' => $code,
             'url' => $url,
             'message' => $log_messages,
           ];
           $messages[] = $message;
-          $output->writeln($message);
         }
-        else {
-          // Success
-          $output->writeln("$code;$url");
-        }
+        // Update the progress bar
+        $completedRequests++;
+        $progressBar->setProgress($completedRequests);
       },
-      'rejected' => function ($reason, $index) use ($output, $urls, $startTimestamp, &$messages) {
+      'rejected' => function ($reason, $index) use ($output, $urls, $startTimestamp, &$messages, &$completedRequests, $progressBar) {
         $code = $reason->getCode();
         $url = (string) $reason->getRequest()->getUri();
         $source = $urls[$index]["source"] ?? 'unknown';
+        $subsource = $urls[$index]["subsource"] ?? 'unknown';
         $log_messages = $this->getLogMessages($url, $startTimestamp);
         $message = [
           'source' => $source,
+          'subsource' => $subsource,
           'code' => $code,
           'url' => $url,
           'message' => $log_messages,
         ];
         $messages[] = $message;
-        $output->writeln($message);
+        // Update the progress bar
+        $completedRequests++;
+        $progressBar->setProgress($completedRequests);
       },
     ]);
 
@@ -150,14 +153,103 @@ class LazyTestService {
     // Force the pool of requests to complete.
     $promise->wait();
 
-    // End the session when you're done
+    // End the user session
     \Drupal::service('session_manager')->destroy();
 
+    $output->writeln("\n\nDone. Copy this into a csv file and import into a spreadsheet like Google Sheets.\n");
+    $messagesCsv = $this->getLogMessagesAsCsv($messages);
+    $output->writeln($messagesCsv);
+    $output->writeln("\nAnalysis:\n---------\n");
+    $this->getLogMessagesAnalysis($messages);
+  }
+
+  public function getLogMessagesAnalysis($messages) {
+    $consolidatedErrors = [];
+
+    foreach ($messages as $result) {
+      foreach ($result['message'] as $message) {
+        // Create a unique key for each error type based on source, code, and message_raw
+        $errorKey = $result['source'] . '|' . $result['code'] . '|' . $message['message_raw'];
+
+        // Check if this error type has already been encountered
+        if (!array_key_exists($errorKey, $consolidatedErrors)) {
+          // If new, initialize the structure to hold error details and the first URL
+          $consolidatedErrors[$errorKey] = [
+            'source' => $result['source'],
+            'code' => $result['code'],
+            'message_raw' => $message['message_raw'],
+            'message_compiled_example' => $message['message_compiled'],
+            'urls' => [$result['url']],
+            'count' => 1,
+          ];
+        } else {
+          // If the error already exists, just append the URL to the list of affected URLs
+          // This also checks to avoid duplicate URLs for the same error
+          $consolidatedErrors[$errorKey]['count']++;  // Increment count
+          if (!in_array($result['url'], $consolidatedErrors[$errorKey]['urls'])) {
+            $consolidatedErrors[$errorKey]['urls'][] = $result['url'];
+          }
+        }
+      }
+    }
+
+    // Output or further process the $consolidatedErrors array
+    // For simplicity, the following code just prints the errors and associated URLs
+    foreach ($consolidatedErrors as $error) {
+      echo "Source: " . $error['source'] . " / HTTP Status code: " . $error['code'] . " / Error count: " .  $error['count'] . "\n";
+      echo "Error Message: " . $error['message_raw'] . "\n";
+      if ($error['message_compiled_example'] !== $error['message_raw']) {
+        echo "Example Error Message with values: " . $error['message_compiled_example'] . "\n";
+      }
+      echo "Affected URLs:\n";
+      foreach ($error['urls'] as $url) {
+        echo " - " . $url . "\n";
+      }
+      echo "\n\n";
+    }
+  }
+
+  public function getLogMessagesAsCsv($messages) {
+
+    // Create a variable to hold your CSV data
+    $row_array = [
+      'source',
+      'subsource',
+      'http status code',
+      'url',
+      'message (type, severity, message)',
+    ];
+    $csvData = '"' . implode('","', $row_array) . "\"\n";
+
+    // Loop through each item in your array
+    foreach ($messages as $row) {
+
+      $message_array = [];
+      foreach ($row['message'] as $message) {
+        $message_array[] = $message['type'] . ' - ' . $message['severity'] . ' - ' . $message['message_compiled'];
+      }
+      $message_string = implode('","',$message_array);
+
+      $row_array = [
+        $row['source'],
+        $row['subsource'] ?? '',
+        $row['code'],
+        $row['url'],
+        $message_string,
+      ];
+
+      // For each item, implode the array values with a comma to create a CSV row
+      $csvData .= '"' . implode('","', $row_array) . "\"\n";
+
+    }
+
+    // Output the CSV data
+    return $csvData;
   }
 
   public function getLogMessages($url, $startTimestamp) {
     $query = \Drupal::database()->select('watchdog', 'w');
-    $query->fields('w', ['message', 'variables', 'type', 'location']);
+    $query->fields('w', ['message', 'variables', 'type', 'location', 'severity']);
     $query->condition('w.timestamp', $startTimestamp, '>=');
     $query->condition('w.location', $url, '=');
     $query->condition('w.severity', RfcLogLevel::WARNING, '>=');
@@ -165,13 +257,21 @@ class LazyTestService {
     $result = $query->execute()->fetchAll();
     $log_messages = [];
     foreach ($result as $record) {
-      $message = str_replace('@backtrace_string', '', $record->message);
-      $message_compiled = $record->type . '-' . (string) t($message, unserialize($record->variables));
+      // Don't include backtrace or path.
+      $message = str_replace('@backtrace_string.', '', $record->message);
+      $message = str_replace('Path: @uri.', '', $message);
+      $message = trim($message);
+      $message_compiled = (string) t($message, unserialize($record->variables));
       $message_compiled = strip_tags($message_compiled);
-      $log_messages[] = $message_compiled;
+      $log_messages[] = [
+        'type' => $record->type,
+        'severity' => $record->severity,
+        'message_raw' => $message,
+        'message_compiled' => $message_compiled,
+      ];
     }
 
-    return implode("|", $log_messages);
+    return $log_messages;
   }
 
 }
