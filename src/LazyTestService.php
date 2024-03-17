@@ -168,8 +168,8 @@ class LazyTestService {
 
     foreach ($messages as $result) {
       foreach ($result['message'] as $message) {
-        // Create a unique key for each error type based on source, code, and message_raw
-        $errorKey = $result['source'] . '|' . $result['code'] . '|' . $message['message_raw'];
+        // Create a unique key for each error type based on source, code, and message
+        $errorKey = $result['source'] . '|' . $result['code'] . '|' . $message['message'];
 
         // Check if this error type has already been encountered
         if (!array_key_exists($errorKey, $consolidatedErrors)) {
@@ -177,8 +177,7 @@ class LazyTestService {
           $consolidatedErrors[$errorKey] = [
             'source' => $result['source'],
             'code' => $result['code'],
-            'message_raw' => $message['message_raw'],
-            'message_compiled_example' => $message['message_compiled'],
+            'message' => $message['message'],
             'urls' => [$result['url']],
             'count' => 1,
           ];
@@ -197,10 +196,7 @@ class LazyTestService {
     // For simplicity, the following code just prints the errors and associated URLs
     foreach ($consolidatedErrors as $error) {
       echo "Source: " . $error['source'] . " / HTTP Status code: " . $error['code'] . " / Error count: " .  $error['count'] . "\n";
-      echo "Error Message: " . $error['message_raw'] . "\n";
-      if ($error['message_compiled_example'] !== $error['message_raw']) {
-        echo "Example Error Message with values: " . $error['message_compiled_example'] . "\n";
-      }
+      echo "Error Message: " . $error['message'] . "\n";
       echo "Affected URLs:\n";
       foreach ($error['urls'] as $url) {
         echo " - " . $url . "\n";
@@ -226,7 +222,7 @@ class LazyTestService {
 
       $message_array = [];
       foreach ($row['message'] as $message) {
-        $message_array[] = $message['type'] . ' - ' . $message['severity'] . ' - ' . $message['message_compiled'];
+        $message_array[] = $message['type'] . ' - ' . $message['severity'] . ' - ' . $message['message'];
       }
       $message_string = implode('","',$message_array);
 
@@ -258,16 +254,18 @@ class LazyTestService {
     $log_messages = [];
     foreach ($result as $record) {
       // Don't include backtrace or path.
-      $message = str_replace('@backtrace_string.', '', $record->message);
-      $message = str_replace('Path: @uri.', '', $message);
+      $message = str_replace('@backtrace_string.', '[backtract filtered]', $record->message);
+      $message = str_replace('@uri', '[uri filtered]', $message);
+      $message = str_replace('%file_uri', '[file_uri filtered]', $message);
+      $message = str_replace('@uuid', '[uuid filtered]', $message);
+      $message = str_replace('@url', '[url filtered]', $message);
       $message = trim($message);
-      $message_compiled = (string) t($message, unserialize($record->variables));
-      $message_compiled = strip_tags($message_compiled);
+      $message = (string) t($message, unserialize($record->variables));
+      $message = strip_tags($message);
       $log_messages[] = [
         'type' => $record->type,
         'severity' => $record->severity,
-        'message_raw' => $message,
-        'message_compiled' => $message_compiled,
+        'message' => $message,
       ];
     }
 
