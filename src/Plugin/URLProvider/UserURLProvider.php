@@ -47,7 +47,7 @@ class UserURLProvider extends URLProviderBase {
         $url_object = $user->toUrl();
         $url_object->setAbsolute();
         $urls[] = [
-          'source' => "users",
+          'source' => "user",
           'url' => $url_object->toString(),
         ];
       }

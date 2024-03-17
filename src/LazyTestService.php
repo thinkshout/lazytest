@@ -85,8 +85,8 @@ class LazyTestService {
     $startTimestamp = time();
 
     $promises = function () use ($urls, $client, $session_cookie) {
-      foreach ($urls as $url) {
-        yield function() use ($client, $url, $session_cookie) {
+      foreach ($urls as $index => $url) {
+        yield $index => function() use ($client, $url, $session_cookie) {
           return $client->requestAsync('HEAD', $url["url"], [
             'headers' => [
               'Cookie' => $session_cookie,
@@ -107,18 +107,14 @@ class LazyTestService {
       'concurrency' => 8,
       'fulfilled' => function ($response, $index) use ($output, $urls, $startTimestamp, &$messages, &$completedRequests, $progressBar) {
         $code = $response->getStatusCode();
-        // Not sure why this is sometimes unknown since we always start with a url.
-        // Seems to only happen with successful items.
-        $url = $urls[$index]["url"] ?? 'unknown';
-        $source = $urls[$index]["source"] ?? 'unknown';
-        $subsource = $urls[$index]["subsource"] ?? 'unknown';
+        $url = $urls[$index];
         $log_messages = $this->getLogMessages($url, $startTimestamp);
         if (!empty($log_messages) || $code != 200) {
           $message = [
-            'source' => $source,
-            'subsource' => $subsource,
+            'source' => $url["source"],
+            'subsource' => $url["subsource"],
             'code' => $code,
-            'url' => $url,
+            'url' => $url["url"],
             'message' => $log_messages,
           ];
           $messages[] = $message;
@@ -129,15 +125,13 @@ class LazyTestService {
       },
       'rejected' => function ($reason, $index) use ($output, $urls, $startTimestamp, &$messages, &$completedRequests, $progressBar) {
         $code = $reason->getCode();
-        $url = (string) $reason->getRequest()->getUri();
-        $source = $urls[$index]["source"] ?? 'unknown';
-        $subsource = $urls[$index]["subsource"] ?? 'unknown';
+        $url = $urls[$index];
         $log_messages = $this->getLogMessages($url, $startTimestamp);
         $message = [
-          'source' => $source,
-          'subsource' => $subsource,
+          'source' => $url["source"],
+          'subsource' => $url["subsource"],
           'code' => $code,
-          'url' => $url,
+          'url' => $url["url"],
           'message' => $log_messages,
         ];
         $messages[] = $message;
@@ -156,11 +150,17 @@ class LazyTestService {
     // End the user session
     \Drupal::service('session_manager')->destroy();
 
-    $output->writeln("\n\nDone. Copy this into a csv file and import into a spreadsheet like Google Sheets.\n");
-    $messagesCsv = $this->getLogMessagesAsCsv($messages);
-    $output->writeln($messagesCsv);
-    $output->writeln("\nAnalysis:\n---------\n");
-    $this->getLogMessagesAnalysis($messages);
+    if (!empty($messages)) {
+      $output->writeln("\n\nDone. Copy this into a csv file and import into a spreadsheet like Google Sheets.\n");
+      $messagesCsv = $this->getLogMessagesAsCsv($messages);
+      $output->writeln($messagesCsv);
+      $output->writeln("\nAnalysis:\n---------\n");
+      $this->getLogMessagesAnalysis($messages);
+    }
+    else {
+      $output->writeln("\n\nDone. No issues found.\n");
+    }
+
   }
 
   public function getLogMessagesAnalysis($messages) {
@@ -247,7 +247,7 @@ class LazyTestService {
     $query = \Drupal::database()->select('watchdog', 'w');
     $query->fields('w', ['message', 'variables', 'type', 'location', 'severity']);
     $query->condition('w.timestamp', $startTimestamp, '>=');
-    $query->condition('w.location', $url, '=');
+    $query->condition('w.location', $url["url"], '=');
     $query->condition('w.severity', RfcLogLevel::WARNING, '>=');
     $query->orderBy('w.wid', 'DESC');
     $result = $query->execute()->fetchAll();
