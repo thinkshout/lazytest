@@ -254,7 +254,7 @@ class LazyTestService {
     $log_messages = [];
     foreach ($result as $record) {
       // Don't include backtrace or path.
-      $message = str_replace('@backtrace_string.', '[backtract filtered]', $record->message);
+      $message = str_replace('@backtrace_string.', '[backtrace filtered]', $record->message);
       $message = str_replace('@uri', '[uri filtered]', $message);
       $message = str_replace('%file_uri', '[file_uri filtered]', $message);
       $message = str_replace('@uuid', '[uuid filtered]', $message);
