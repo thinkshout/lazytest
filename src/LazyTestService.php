@@ -150,6 +150,12 @@ class LazyTestService {
     // End the user session
     \Drupal::service('session_manager')->destroy();
 
+    // Sort
+    $source = array_column($messages, 'source');
+    $subsource = array_column($messages, 'subsource');
+    $url = array_column($messages, 'url');
+    array_multisort($source, SORT_ASC, $subsource, SORT_ASC, $url, SORT_ASC, $messages);
+
     if (!empty($messages)) {
       $output->writeln("\n\nDone. Copy this into a csv file and import into a spreadsheet like Google Sheets.\n");
       $messagesCsv = $this->getLogMessagesAsCsv($messages);

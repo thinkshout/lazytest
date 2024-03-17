@@ -39,12 +39,6 @@ class LazyTestCommands extends DrushCommands {
       return parse_url($item['url'], PHP_URL_SCHEME) . '://' . parse_url($item['url'], PHP_URL_HOST) === $current_scheme_and_host;
     });
 
-    // Sort.
-    $source = array_column($urls, 'source');
-    $subsource = array_column($urls, 'subsource');
-    $url = array_column($urls, 'url');
-    array_multisort($source, SORT_ASC, $subsource, SORT_ASC, $url, SORT_ASC, $urls);
-
     $this->lazyTestService->checkURLs($urls);
   }
 
