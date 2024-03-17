@@ -112,7 +112,7 @@ class LazyTestService {
         if (!empty($log_messages) || $code != 200) {
           $message = [
             'source' => $url["source"],
-            'subsource' => $url["subsource"],
+            'subsource' => $url["subsource"] ?? '',
             'code' => $code,
             'url' => $url["url"],
             'message' => $log_messages,
@@ -129,7 +129,7 @@ class LazyTestService {
         $log_messages = $this->getLogMessages($url, $startTimestamp);
         $message = [
           'source' => $url["source"],
-          'subsource' => $url["subsource"],
+          'subsource' => $url["subsource"] ?? '',
           'code' => $code,
           'url' => $url["url"],
           'message' => $log_messages,

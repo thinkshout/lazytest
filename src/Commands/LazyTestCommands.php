@@ -20,15 +20,31 @@ class LazyTestCommands extends DrushCommands {
    */
   public function run() {
     $urls = $this->lazyTestService->getAllURLs();
+
+    // Filter out empty urls.
     $urls = array_filter($urls, function($item) {
       return !empty($item['url']);
     });
-    $urls = array_map('unserialize', array_unique(array_map('serialize', $urls), SORT_REGULAR));
-    // Filter the URLs to only include those that have the same scheme and host as the current site
+
+    // Filter out non-unique urls.
+    array_multisort(array_column($urls, 'url'), SORT_ASC, $urls);
+    $urls = array_intersect_key(
+      $urls,
+      array_unique(array_column($urls, 'url'))
+    );
+
+    // Filter out external urls.
     $current_scheme_and_host = \Drupal::request()->getSchemeAndHttpHost();
     $urls = array_filter($urls, function($item) use ($current_scheme_and_host) {
       return parse_url($item['url'], PHP_URL_SCHEME) . '://' . parse_url($item['url'], PHP_URL_HOST) === $current_scheme_and_host;
     });
+
+    // Sort.
+    $source = array_column($urls, 'source');
+    $subsource = array_column($urls, 'subsource');
+    $url = array_column($urls, 'url');
+    array_multisort($source, SORT_ASC, $subsource, SORT_ASC, $url, SORT_ASC, $urls);
+
     $this->lazyTestService->checkURLs($urls);
   }
 

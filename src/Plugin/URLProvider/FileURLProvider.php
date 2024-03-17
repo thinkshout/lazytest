@@ -48,6 +48,7 @@ class FileURLProvider extends URLProviderBase {
         $url = $stream_wrapper_manager->getViaUri($file_uri)->getExternalUrl();
         $urls[] = [
           'source' => "file",
+          'subsource' => '',
           'url' => $url,
         ];
       }

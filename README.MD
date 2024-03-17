@@ -1,10 +1,8 @@
 ToDo:
-- Add type to output (node/doctor, media/video, etc.)
 - Add a way to do an initial run, show results, maybe with checkboxes for each line pre-checked, ability for future runs to exclude those urls with the same code and/or the same error message.
 - Way to exclude certain urls
 - Way to include certain urls
-- Count success/fail and write at end of run.
 - Add configuration screen where you can enable different plugins etc.
-- Consider sitemap and menus for url sources.
+- Consider sitemap for url sources.
 - Should I cache bust by clearing all cache at the start of the run or by including url parameters? Which is more reliable/faster?
 - Add javascript console errors. Would have to use a headless browser like Puppeteer, Playwright or https://github.com/chrome-php/chrome. We should test speed and see if it makes sense to move our current url get logic over.
