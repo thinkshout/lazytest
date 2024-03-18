@@ -2,6 +2,9 @@
 
 namespace Drupal\lazytest;
 
+define('MAX_DEPTH', 2);
+define('BASE_URL', 'http://web.lvhn.localhost');
+
 use Drupal\Core\Logger\RfcLogLevel;
 use Drupal\Core\Url;
 use Drupal\lazytest\Plugin\URLProviderManager;
@@ -26,10 +29,10 @@ class LazyTestService {
     $allURLs = [];
     $definitions = $this->urlProviderManager->getDefinitions();
     foreach ($definitions as $definition) {
-//      if ($definition["id"] == 'content_type_url_provider') {
+      if ($definition["id"] == 'content_type_url_provider') {
         $instance = $this->urlProviderManager->createInstance($definition['id']);
         $allURLs = array_merge($allURLs, $instance->getURLs());
-//      }
+      }
     }
     return $allURLs;
   }
@@ -40,11 +43,15 @@ class LazyTestService {
     drupal_flush_all_caches();
 
     $output = new ConsoleOutput();
-    $progressBar = new ProgressBar($output, count($urls));
-    $progressBar->start();
     $completedRequests = 0;
 
     $messages = [];
+    $allUrls = [];
+
+    foreach ($urls as &$url) {
+      $url["url"] = $this->normalizeUrl($url["url"]);
+    }
+    unset($url);
 
     $client = new Client([
       'base_uri' => 'http://web.lvhn.localhost/',
@@ -84,32 +91,80 @@ class LazyTestService {
 
     $startTimestamp = time();
 
-    $promises = function () use ($urls, $client, $session_cookie) {
-      foreach ($urls as $index => $url) {
-        yield $index => function() use ($client, $url, $session_cookie) {
-          return $client->requestAsync('HEAD', $url["url"], [
-            'headers' => [
-              'Cookie' => $session_cookie,
-            ],
-            'timeout' => 120,
-            'allow_redirects' => [
-              'max' => 20, // follow up to x redirects
-              'strict' => false, // use strict RFC compliant redirects
-              'referer' => true, // add a Referer header
-              'protocols' => ['http', 'https'], // restrict redirects to 'http' and 'https'
-            ],
-          ]);
-        };
-      }
-    };
+    $layers = [$urls];  // Initialize layers with the first layer being $urls
+    for ($i = 0; $i < MAX_DEPTH; $i++) {
+      $layers[] = [];  // Initialize the next layer
 
-    $pool = new Pool($client, $promises(), [
-      'concurrency' => 8,
-      'fulfilled' => function ($response, $index) use ($output, $urls, $startTimestamp, &$messages, &$completedRequests, $progressBar) {
-        $code = $response->getStatusCode();
-        $url = $urls[$index];
-        $log_messages = $this->getLogMessages($url, $startTimestamp);
-        if (!empty($log_messages) || $code != 200) {
+      // Start a new progress bar for each level
+      $progressBar = new ProgressBar($output, count($layers[$i]));
+      $progressBar->start();
+
+      $promises = function () use (&$layers, $client, $session_cookie, $i, &$allUrls) {
+        foreach ($layers[$i] as $index => $url) {
+          yield $index => function () use (&$layers, $client, $url, $session_cookie, $i, &$allUrls) {
+            // Skip if the URL is a logout link since we don't want to log out the currently logged in user.
+            if (strpos($url["url"], '/user/logout') !== false) {
+              return null;
+            }
+            return $client->requestAsync('GET', $url["url"], [
+              'headers' => [
+                'Cookie' => $session_cookie,
+              ],
+              'timeout' => 120,
+              'allow_redirects' => [
+                'max' => 20,
+                // follow up to x redirects
+                'strict' => FALSE,
+                // use strict RFC compliant redirects
+                'referer' => TRUE,
+                // add a Referer header
+                'protocols' => ['http', 'https'],
+                // restrict redirects to 'http' and 'https'
+              ],
+            ])->then(function ($response) use (&$layers, $url, $i, &$allUrls) {
+              $html = $response->getBody();
+              $dom = new \DOMDocument;
+              @$dom->loadHTML($html);
+              $links = $dom->getElementsByTagName('a');
+              foreach ($links as $link) {
+                $href = $link->getAttribute('href');
+                $absoluteUrl = $this->createAbsoluteUrlIfInternal($href, $url["url"]);
+                // If $absoluteUrl is not null and it's not already in $allUrls, add it to the next layer and $allUrls
+                if ($absoluteUrl !== null && !in_array($absoluteUrl, $allUrls)) {
+                  $layers[$i + 1][] = ['url' => $absoluteUrl];
+                  $allUrls[] = $absoluteUrl;
+                }
+              }
+              return $response;
+            });
+          };
+        }
+      };
+
+      $pool = new Pool($client, $promises(), [
+        'concurrency' => 8,
+        'fulfilled' => function ($response, $index) use ($output, $urls, $startTimestamp, &$messages, &$completedRequests, $progressBar) {
+          $code = $response->getStatusCode();
+          $url = $urls[$index];
+          $log_messages = $this->getLogMessages($url, $startTimestamp);
+          if (!empty($log_messages) || $code != 200) {
+            $message = [
+              'source' => $url["source"],
+              'subsource' => $url["subsource"] ?? '',
+              'code' => $code,
+              'url' => $url["url"],
+              'message' => $log_messages,
+            ];
+            $messages[] = $message;
+          }
+          // Update the progress bar
+          $completedRequests++;
+          $progressBar->setProgress($completedRequests);
+        },
+        'rejected' => function ($reason, $index) use ($output, $urls, $startTimestamp, &$messages, &$completedRequests, $progressBar) {
+          $code = $reason->getCode();
+          $url = $urls[$index];
+          $log_messages = $this->getLogMessages($url, $startTimestamp);
           $message = [
             'source' => $url["source"],
             'subsource' => $url["subsource"] ?? '',
@@ -118,34 +173,22 @@ class LazyTestService {
             'message' => $log_messages,
           ];
           $messages[] = $message;
-        }
-        // Update the progress bar
-        $completedRequests++;
-        $progressBar->setProgress($completedRequests);
-      },
-      'rejected' => function ($reason, $index) use ($output, $urls, $startTimestamp, &$messages, &$completedRequests, $progressBar) {
-        $code = $reason->getCode();
-        $url = $urls[$index];
-        $log_messages = $this->getLogMessages($url, $startTimestamp);
-        $message = [
-          'source' => $url["source"],
-          'subsource' => $url["subsource"] ?? '',
-          'code' => $code,
-          'url' => $url["url"],
-          'message' => $log_messages,
-        ];
-        $messages[] = $message;
-        // Update the progress bar
-        $completedRequests++;
-        $progressBar->setProgress($completedRequests);
-      },
-    ]);
+          // Update the progress bar
+          $completedRequests++;
+          $progressBar->setProgress($completedRequests);
+        },
+      ]);
 
-    // Initiate the transfers and create a promise
-    $promise = $pool->promise();
+      // Initiate the transfers and create a promise
+      $promise = $pool->promise();
 
-    // Force the pool of requests to complete.
-    $promise->wait();
+      // Force the pool of requests to complete.
+      $promise->wait();
+
+      // Finish the progress bar for the current level
+      $progressBar->finish();
+      echo "\n";
+    }
 
     // End the user session
     \Drupal::service('session_manager')->destroy();
@@ -167,6 +210,83 @@ class LazyTestService {
       $output->writeln("\n\nDone. No issues found.\n");
     }
 
+  }
+
+  public function createAbsoluteUrlIfInternal($href, $currentUrl) {
+    // If $href is an empty string, ignore.
+    if (empty($href)) {
+      return null;
+    }
+
+    // Exclude parameter only links
+    if (strpos($href, '?') === 0) {
+      return null;
+    }
+
+    // Exclude anchor links
+    if (strpos($href, '#') === 0) {
+      return null;
+    }
+
+    // Exclude URLs that contain ":" but not part of "http:" or "https:"
+    if (strpos($href, ':') !== false && !preg_match('/https?:/', $href)) {
+      return null;
+    }
+
+    // Normalize URL
+    $href = $this->normalizeUrl($href);
+
+    // Check if the URL is already absolute
+    if (filter_var($href, FILTER_VALIDATE_URL)) {
+      $absoluteUrl = $href;
+    } else {
+      // Convert relative URLs to absolute
+      $absoluteUrl = $this->createAbsoluteUrl($href, $currentUrl);
+    }
+
+    // Check if the URL is an internal link
+    $parsedAbsoluteUrl = parse_url($absoluteUrl);
+    $baseHost = parse_url(BASE_URL, PHP_URL_HOST);
+    if (isset($parsedAbsoluteUrl['host']) && $parsedAbsoluteUrl['host'] !== $baseHost) {
+      return null;
+    }
+
+    // Exclude non-HTML links
+    $extension = '';
+    if (isset($parsedAbsoluteUrl['path'])) {
+      $extension = pathinfo($parsedAbsoluteUrl['path'], PATHINFO_EXTENSION);
+    }
+    if ($extension != '' && $extension != 'html') {
+      return null;
+    }
+
+    return $absoluteUrl;
+  }
+
+  public function normalizeUrl($url) {
+    // Remove URL parameters
+    $url = strtok($url, '?');
+    // Convert to lowercase
+    $url = strtolower($url);
+    // Remove trailing slash only if the URL is not "/"
+    if ($url !== '/') {
+      $url = rtrim($url, '/');
+    }
+    return $url;
+  }
+
+  private function createAbsoluteUrl($relativeUrl, $currentUrl) {
+    if ($relativeUrl === '/') {
+      // If the relative URL is "/", return the base URL
+      return BASE_URL;
+    } else if (strpos($relativeUrl, '/') === 0) {
+      return Url::fromUri(BASE_URL . $relativeUrl)->setAbsolute()->toString();
+    } else if (filter_var($relativeUrl, FILTER_VALIDATE_URL)) {
+      // If the relative URL is already an absolute URL, return it as is
+      return $relativeUrl;
+    } else {
+      return Url::fromUri(BASE_URL . '/' . $currentUrl . '/' . $relativeUrl)->setAbsolute()->toString();
+    }
   }
 
   public function getLogMessagesAnalysis($messages) {

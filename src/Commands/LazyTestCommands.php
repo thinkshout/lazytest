@@ -21,6 +21,12 @@ class LazyTestCommands extends DrushCommands {
   public function run() {
     $urls = $this->lazyTestService->getAllURLs();
 
+    // Normalize all URLs before processing
+    foreach ($urls as &$url) {
+      $url['url'] = $this->lazyTestService->normalizeUrl($url['url']);
+    }
+    unset($url);
+
     // Filter out empty urls.
     $urls = array_filter($urls, function($item) {
       return !empty($item['url']);
