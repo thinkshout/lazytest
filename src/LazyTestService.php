@@ -174,8 +174,8 @@ class LazyTestService {
 
     foreach ($messages as $result) {
       foreach ($result['message'] as $message) {
-        // Create a unique key for each error type based on source, code, and message
-        $errorKey = $result['source'] . '|' . $result['code'] . '|' . $message['message'];
+        // Create a unique key for each error type based on only message for now.
+        $errorKey = $message['message'];
 
         // Check if this error type has already been encountered
         if (!array_key_exists($errorKey, $consolidatedErrors)) {
@@ -201,11 +201,10 @@ class LazyTestService {
     // Output or further process the $consolidatedErrors array
     // For simplicity, the following code just prints the errors and associated URLs
     foreach ($consolidatedErrors as $error) {
-      echo "Source: " . $error['source'] . " / HTTP Status code: " . $error['code'] . " / Error count: " .  $error['count'] . "\n";
-      echo "Error Message: " . $error['message'] . "\n";
+      echo "Error count: " .  $error['count'] . " / Error Message: " . $error['message'] . "\n";
       echo "Affected URLs:\n";
       foreach ($error['urls'] as $url) {
-        echo " - " . $url . "\n";
+        echo " - HTTP Status code: " . $error['code'] . " / Source: " . $error['source'] . " / " . $url . "\n";
       }
       echo "\n\n";
     }
