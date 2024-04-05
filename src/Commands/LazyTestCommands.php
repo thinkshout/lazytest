@@ -43,13 +43,18 @@ class LazyTestCommands extends DrushCommands {
 
     // Check if all options are NULL or not set
     if ($options['baseurl'] === NULL && $options['urls'] === NULL && $options['plugins'] === NULL && $options['crawl'] === FALSE && $options['crawldepth'] === 0) {
+
+      $this->output()->writeln("\nUse 'drush lazytest:run' with any option to skip these choices and start the tests directly.");
+      $this->output()->writeln("Options start with '--' followed by the options listed below in parentheses.");
+      $this->output()->writeln("Example: drush lazytest:run --baseurl=https://www.drupal.org --urls=/,/about --crawl=1 --plugins=file,route");
+
       // Start asking the user for input
       // @todo: set baseurl to NULL.
-      $options['baseurl'] = $this->io()->ask('Base url override', 'http://web.lvhn.localhost');
-      $options['urls'] = $this->io()->ask('Enter a comma-separated list of URLs to check', NULL);
-      $options['crawl'] = $this->io()->confirm('Enable crawl mode', false);
+      $options['baseurl'] = $this->io()->ask('(baseurl) override the base URL in case Drupal doesn\'t return the right one', 'http://web.lvhn.localhost');
+      $options['urls'] = $this->io()->ask('(urls) a comma-separated list of URLs to test', NULL);
+      $options['crawl'] = $this->io()->confirm('(crawl) follow internal links to test additional pages', false);
       if ($options['crawl']) {
-        $options['crawldepth'] = $this->io()->ask('Set crawl depth', 1);
+        $options['crawldepth'] = $this->io()->ask('(crawldepth) depth to follow internal links to', 1);
       }
       $availablePlugins = $this->urlProviderManager->getDefinitions();
       $pluginChoices = [];
@@ -57,7 +62,7 @@ class LazyTestCommands extends DrushCommands {
       foreach ($availablePlugins as $plugin) {
         $pluginChoices[$plugin['id']] = $plugin['label']->render();
       }
-      $options['plugins'] = $this->io()->choice('Choose a plugin', $pluginChoices, 0);
+      $options['plugins'] = $this->io()->choice('(plugins) Choose a plugin or when specifying options, a comma separated list.', $pluginChoices, 0);
 
     }
 

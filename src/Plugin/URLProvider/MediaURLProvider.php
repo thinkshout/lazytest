@@ -10,8 +10,8 @@ use Drupal\node\NodeStorageInterface;
  * Provides a 'Media' URLProvider.
  *
  * @URLProvider(
- *   id = "media_url_provider",
- *   label = @Translation("Media"),
+ *   id = "media",
+ *   label = @Translation("(media) 10 newest and 10 oldest published entities from each Media Type."),
  * )
  */
 class MediaURLProvider extends URLProviderBase {

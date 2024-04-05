@@ -10,8 +10,8 @@ use Drupal\node\NodeStorageInterface;
  * Provides a 'Views' URLProvider.
  *
  * @URLProvider(
- *   id = "views_url_provider",
- *   label = @Translation("Views"),
+ *   id = "views",
+ *   label = @Translation("(views) All published Views with a page display."),
  * )
  */
 class ViewsURLProvider extends URLProviderBase {
@@ -33,6 +33,11 @@ class ViewsURLProvider extends URLProviderBase {
 
     // Generate URLs for each view entity.
     foreach ($views as $view) {
+      // Skip views that are part of Drupal core.
+      $foo = $view->get('module');
+      if ($view->get('module') !== 'views') {
+        continue;
+      }
       // We only want to generate URLs for views that have a page display.
       foreach ($view->get('display') as $display) {
         if ($display['display_plugin'] === 'page' && (!isset($display['display_options']['enabled']) || (isset($display['display_options']['enabled']) && $display['display_options']['enabled'] !== FALSE))) {

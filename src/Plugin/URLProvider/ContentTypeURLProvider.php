@@ -10,8 +10,8 @@ use Drupal\node\NodeStorageInterface;
  * Provides a 'Content Type' URLProvider.
  *
  * @URLProvider(
- *   id = "content_type_url_provider",
- *   label = @Translation("Content Type"),
+ *   id = "content_type",
+ *   label = @Translation("(content_type) 10 newest and 10 oldest published nodes from each Content Type."),
  * )
  */
 class ContentTypeURLProvider extends URLProviderBase {

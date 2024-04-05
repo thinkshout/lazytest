@@ -9,8 +9,8 @@ use Drupal\lazytest\Plugin\URLProviderBase;
  * Provides a 'Taxonomy' URLProvider.
  *
  * @URLProvider(
- *   id = "taxonomy_url_provider",
- *   label = @Translation("Taxonomy"),
+ *   id = "taxonomy",
+ *   label = @Translation("(taxonomy) 10 newest and 10 oldest published terms from each Vocabulary."),
  * )
  */
 class TaxonomyURLProvider extends URLProviderBase {

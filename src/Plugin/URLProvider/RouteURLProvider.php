@@ -10,8 +10,8 @@ use Drupal\node\NodeStorageInterface;
  * Provides a 'Route' URLProvider.
  *
  * @URLProvider(
- *   id = "route_url_provider",
- *   label = @Translation("Route"),
+ *   id = "route",
+ *   label = @Translation("(route) All Route URLs from custom modules."),
  * )
  */
 class RouteURLProvider extends URLProviderBase {
@@ -25,7 +25,7 @@ class RouteURLProvider extends URLProviderBase {
     foreach ($modules as $module) {
       // @todo: make path a parameter (core, contrib, custom?)
       $foo = $module->getPath();
-      if (strpos($module->getPath(), 'core/') !== FALSE) {
+      if (strpos($module->getPath(), '/custom/') !== FALSE) {
         $custom_modules[] = $module->getName();
       }
     }

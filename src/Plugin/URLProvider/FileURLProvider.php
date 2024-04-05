@@ -10,8 +10,8 @@ use Drupal\node\NodeStorageInterface;
  * Provides a 'File' URLProvider.
  *
  * @URLProvider(
- *   id = "file_url_provider",
- *   label = @Translation("File"),
+ *   id = "file",
+ *   label = @Translation("(file) 10 newest and 10 oldest File Entities."),
  * )
  */
 class FileURLProvider extends URLProviderBase {

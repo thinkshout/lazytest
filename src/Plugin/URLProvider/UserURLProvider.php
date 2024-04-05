@@ -10,8 +10,8 @@ use Drupal\node\NodeStorageInterface;
  * Provides a 'User' URLProvider.
  *
  * @URLProvider(
- *   id = "user_url_provider",
- *   label = @Translation("User"),
+ *   id = "user",
+ *   label = @Translation("(user) 10 newest and 10 oldest active users excluding user 0."),
  * )
  */
 class UserURLProvider extends URLProviderBase {

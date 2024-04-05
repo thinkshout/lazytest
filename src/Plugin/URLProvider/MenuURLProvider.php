@@ -9,8 +9,8 @@ use Drupal\lazytest\Plugin\URLProviderBase;
  * Provides a 'Menu' URLProvider.
  *
  * @URLProvider(
- *   id = "menu_url_provider",
- *   label = @Translation("Menu"),
+ *   id = "menu",
+ *   label = @Translation("(menu) All Menu items."),
  * )
  */
 class MenuURLProvider extends URLProviderBase {
