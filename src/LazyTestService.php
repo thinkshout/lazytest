@@ -127,10 +127,6 @@ class LazyTestService {
       $promises = function () use (&$layers, $client, $session_cookie, $i, &$allUrls, $baseurl, $crawl, $crawldepth) {
         foreach ($layers[$i] as $index => $url) {
           yield $index => function () use (&$layers, $client, $url, $session_cookie, $i, &$allUrls, $baseurl, $crawl, $crawldepth) {
-            // Skip if the URL is a logout link since we don't want to log out the currently logged in user.
-            if (strpos($url["url"], '/user/logout') !== false) {
-              return null;
-            }
             $requestPromise = $client->requestAsync('GET', $url["url"], [
               'headers' => [
                 'Cookie' => $session_cookie,
@@ -185,7 +181,12 @@ class LazyTestService {
       $pool = new Pool($client, $promises(), [
         'concurrency' => 8,
         'fulfilled' => function ($response, $index) use ($output, $layers, $i, $startTimestamp, &$messages, &$completedRequests, $progressBar) {
-          $code = $response->getStatusCode();
+          if (empty($response)) {
+            $code = 'no response';
+          }
+          else {
+            $code = $response->getStatusCode();
+          }
           $url = $layers[$i][$index];
           $log_messages = $this->getLogMessages($url, $startTimestamp);
           if (!empty($log_messages) || $code != 200) {

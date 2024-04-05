@@ -17,11 +17,30 @@ use Drupal\node\NodeStorageInterface;
 class RouteURLProvider extends URLProviderBase {
 
   public function getURLs() {
+
+    // Get list of custom modules.
+    $moduleHandler = \Drupal::service('module_handler');
+    $modules = $moduleHandler->getModuleList();
+    $custom_modules = [];
+    foreach ($modules as $module) {
+      // @todo: make path a parameter (core, contrib, custom?)
+      $foo = $module->getPath();
+      if (strpos($module->getPath(), 'core/') !== FALSE) {
+        $custom_modules[] = $module->getName();
+      }
+    }
+
     $urls = [];
     $routes = \Drupal::service('router.route_provider')->getAllRoutes();
 
     foreach ($routes as $route_name => $route) {
       try {
+
+        $route_module = explode('.', $route_name)[0];
+        if (!in_array($route_module, $custom_modules)) {
+          // Skip if this route doesn't belong to a custom module.
+          continue;
+        }
         if (!empty($route->getOption('parameters'))) {
           // Skip if we need parameters.
           continue;

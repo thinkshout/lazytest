@@ -85,6 +85,10 @@ class LazyTestCommands extends DrushCommands {
       return $itemHost === $current_scheme_and_host || $itemHost === $baseurl;
     });
 
+    // Filter out specific urls like logout.
+    $urls = array_filter($urls, function($item) {
+      return strpos($item['url'], '/user/logout') === false;
+    });
 
     $this->lazyTestService->checkURLs($baseurl, $urls, $options["crawl"], $options["crawldepth"]);
   }
