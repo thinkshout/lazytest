@@ -22,7 +22,7 @@ class LazyTestService {
 
   public function getAllURLs($command_line_urls, $plugins) {
     $output = new ConsoleOutput();
-    $output->writeln("Creating list of urls and starting download.");
+    $output->writeln("Creating list of urls.");
 
     $allURLs = [];
 
@@ -63,12 +63,13 @@ class LazyTestService {
 
   public function checkURLs($baseurl, $urls, $crawl, $crawldepth) {
 
+    $output = new ConsoleOutput();
+
     // We want to get fresh versions of pages.
+    $output->writeln("Clearing all caches.");
     drupal_flush_all_caches();
 
-    $output = new ConsoleOutput();
     $completedRequests = 0;
-
     $messages = [];
 
     foreach ($urls as &$url) {
@@ -119,6 +120,14 @@ class LazyTestService {
     $layers = [$urls];  // Initialize layers with the first layer being $urls
     for ($i = 0; $i <= $crawldepth; $i++) {
       $layers[] = [];  // Initialize the next layer
+
+      if ($crawl && $i > 0) {
+        $output->writeln("Starting urls checks at crawl depth " . $i);
+      }
+      else {
+        $output->writeln("Starting url checks.");
+      }
+
 
       // Start a new progress bar for each level
       $progressBar = new ProgressBar($output, count($layers[$i]));

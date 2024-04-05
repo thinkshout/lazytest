@@ -39,7 +39,27 @@ class LazyTestCommands extends DrushCommands {
    * @option crawl Enable crawl mode.
    * @option crawldepth Set crawl depth.
    */
-  public function run($options = ['baseurl' => NULL, 'urls' => NULL, 'plugins' => NULL, 'crawl' => FALSE, 'crawldepth' => 1]) {
+  public function run($options = ['baseurl' => NULL, 'urls' => NULL, 'plugins' => NULL, 'crawl' => FALSE, 'crawldepth' => 0]) {
+
+    // Check if all options are NULL or not set
+    if ($options['baseurl'] === NULL && $options['urls'] === NULL && $options['plugins'] === NULL && $options['crawl'] === FALSE && $options['crawldepth'] === 0) {
+      // Start asking the user for input
+      // @todo: set baseurl to NULL.
+      $options['baseurl'] = $this->io()->ask('Base url override', 'http://web.lvhn.localhost');
+      $options['urls'] = $this->io()->ask('Enter a comma-separated list of URLs to check', NULL);
+      $options['crawl'] = $this->io()->confirm('Enable crawl mode', false);
+      if ($options['crawl']) {
+        $options['crawldepth'] = $this->io()->ask('Set crawl depth', 1);
+      }
+      $availablePlugins = $this->urlProviderManager->getDefinitions();
+      $pluginChoices = [];
+      $pluginChoices["none"] = "None";
+      foreach ($availablePlugins as $plugin) {
+        $pluginChoices[$plugin['id']] = $plugin['label']->render();
+      }
+      $options['plugins'] = $this->io()->choice('Choose a plugin', $pluginChoices, 0);
+
+    }
 
     $baseurl = $options["baseurl"];
 
