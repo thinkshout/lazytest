@@ -1,6 +1,10 @@
 services:
+  plugin.manager.lazytest.url_provider:
+    class: Drupal\lazytest\Plugin\URLProviderManager
+    arguments: ['@container.namespaces', '@cache.discovery', '@module_handler']
+    parent: default_plugin_manager
   lazytest.commands:
     class: \Drupal\lazytest\Commands\LazyTestCommands
-    arguments: [ '@lazytest.lazy_test_service' ]
+    arguments: ['@lazytest.lazy_test_service', '@plugin.manager.lazytest.url_provider']
     tags:
       - { name: drush.command }

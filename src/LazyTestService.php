@@ -2,9 +2,6 @@
 
 namespace Drupal\lazytest;
 
-define('MAX_DEPTH', 2);
-define('BASE_URL', 'http://web.lvhn.localhost');
-
 use Drupal\Core\Logger\RfcLogLevel;
 use Drupal\Core\Url;
 use Drupal\lazytest\Plugin\URLProviderManager;
@@ -23,21 +20,48 @@ class LazyTestService {
     $this->urlProviderManager = $urlProviderManager;
   }
 
-  public function getAllURLs() {
+  public function getAllURLs($command_line_urls, $plugins) {
     $output = new ConsoleOutput();
     $output->writeln("Creating list of urls and starting download.");
+
     $allURLs = [];
-    $definitions = $this->urlProviderManager->getDefinitions();
-    foreach ($definitions as $definition) {
-      if ($definition["id"] == 'content_type_url_provider') {
+
+    // Add urls passed in through the command line.
+    if (!empty($command_line_urls)) {
+      $command_line_urls = explode(',', $command_line_urls);
+      foreach ($command_line_urls as $command_line_url) {
+        $allURLs[] = [
+          'source' => "command line",
+          'url' => $command_line_url,
+        ];
+      }
+    }
+
+    // Use all plugins or just the one(s) coming in from the command line.
+    if (empty($plugins)) {
+      $definitions = $this->urlProviderManager->getDefinitions();
+      foreach ($definitions as $definition) {
         $instance = $this->urlProviderManager->createInstance($definition['id']);
         $allURLs = array_merge($allURLs, $instance->getURLs());
       }
     }
+    elseif ($plugins == "none") {
+      // Do nothing.
+    }
+    else {
+      $plugins = explode(',', $plugins);
+      foreach ($plugins as $plugin) {
+        $instance = $this->urlProviderManager->createInstance($plugin);
+        $allURLs = array_merge($allURLs, $instance->getURLs());
+      }
+    }
+
+
+
     return $allURLs;
   }
 
-  public function checkURLs($urls) {
+  public function checkURLs($baseurl, $urls, $crawl, $crawldepth) {
 
     // We want to get fresh versions of pages.
     drupal_flush_all_caches();
@@ -46,15 +70,16 @@ class LazyTestService {
     $completedRequests = 0;
 
     $messages = [];
-    $allUrls = [];
 
     foreach ($urls as &$url) {
       $url["url"] = $this->normalizeUrl($url["url"]);
     }
     unset($url);
 
+    $allUrls = array_column($urls, 'url');
+
     $client = new Client([
-      'base_uri' => 'http://web.lvhn.localhost/',
+      'base_uri' => $baseurl,
       'verify' => false, // Ignore SSL certificate errors
       'defaults' => [
         'headers' => [
@@ -92,21 +117,21 @@ class LazyTestService {
     $startTimestamp = time();
 
     $layers = [$urls];  // Initialize layers with the first layer being $urls
-    for ($i = 0; $i < MAX_DEPTH; $i++) {
+    for ($i = 0; $i <= $crawldepth; $i++) {
       $layers[] = [];  // Initialize the next layer
 
       // Start a new progress bar for each level
       $progressBar = new ProgressBar($output, count($layers[$i]));
       $progressBar->start();
 
-      $promises = function () use (&$layers, $client, $session_cookie, $i, &$allUrls) {
+      $promises = function () use (&$layers, $client, $session_cookie, $i, &$allUrls, $baseurl, $crawl, $crawldepth) {
         foreach ($layers[$i] as $index => $url) {
-          yield $index => function () use (&$layers, $client, $url, $session_cookie, $i, &$allUrls) {
+          yield $index => function () use (&$layers, $client, $url, $session_cookie, $i, &$allUrls, $baseurl, $crawl, $crawldepth) {
             // Skip if the URL is a logout link since we don't want to log out the currently logged in user.
             if (strpos($url["url"], '/user/logout') !== false) {
               return null;
             }
-            return $client->requestAsync('GET', $url["url"], [
+            $requestPromise = $client->requestAsync('GET', $url["url"], [
               'headers' => [
                 'Cookie' => $session_cookie,
               ],
@@ -121,31 +146,47 @@ class LazyTestService {
                 'protocols' => ['http', 'https'],
                 // restrict redirects to 'http' and 'https'
               ],
-            ])->then(function ($response) use (&$layers, $url, $i, &$allUrls) {
-              $html = $response->getBody();
-              $dom = new \DOMDocument;
-              @$dom->loadHTML($html);
-              $links = $dom->getElementsByTagName('a');
-              foreach ($links as $link) {
-                $href = $link->getAttribute('href');
-                $absoluteUrl = $this->createAbsoluteUrlIfInternal($href, $url["url"]);
-                // If $absoluteUrl is not null and it's not already in $allUrls, add it to the next layer and $allUrls
-                if ($absoluteUrl !== null && !in_array($absoluteUrl, $allUrls)) {
-                  $layers[$i + 1][] = ['url' => $absoluteUrl];
-                  $allUrls[] = $absoluteUrl;
+            ]);
+            // We only need to get links if we're crawling and have not reached the crawl depth.
+            if ($crawl && $i < $crawldepth) {
+              $requestPromise = $requestPromise->then(function ($response) use (&$layers, $url, $i, &$allUrls, $baseurl, $crawl) {
+                $html = $response->getBody();
+                $dom = new \DOMDocument;
+                @$dom->loadHTML($html);
+
+                // If we're logged in, we get a lot of link options from the administrative toolbar. Leave those out.
+                $xpath = new \DOMXPath($dom);
+                $toolbarAdministrationDiv = $xpath->query('//div[@id="toolbar-administration"]')->item(0);
+                if ($toolbarAdministrationDiv) {
+                  $toolbarAdministrationDiv->parentNode->removeChild($toolbarAdministrationDiv);
                 }
-              }
-              return $response;
-            });
+
+                $links = $dom->getElementsByTagName('a');
+                foreach ($links as $link) {
+                  $href = $link->getAttribute('href');
+                  $absoluteUrl = $this->createAbsoluteUrlIfInternal($href, $url["url"], $baseurl);
+                  // If $absoluteUrl is not null and it's not already in $allUrls, add it to the next layer and $allUrls
+                  if ($absoluteUrl !== null && !in_array($absoluteUrl, $allUrls)) {
+                    $layers[$i + 1][] = [
+                      'source' => 'crawl',
+                      'url' => $absoluteUrl,
+                    ];
+                    $allUrls[] = $absoluteUrl;
+                  }
+                }
+                return $response;
+              });
+            }
+            return $requestPromise;
           };
         }
       };
 
       $pool = new Pool($client, $promises(), [
         'concurrency' => 8,
-        'fulfilled' => function ($response, $index) use ($output, $urls, $startTimestamp, &$messages, &$completedRequests, $progressBar) {
+        'fulfilled' => function ($response, $index) use ($output, $layers, $i, $startTimestamp, &$messages, &$completedRequests, $progressBar) {
           $code = $response->getStatusCode();
-          $url = $urls[$index];
+          $url = $layers[$i][$index];
           $log_messages = $this->getLogMessages($url, $startTimestamp);
           if (!empty($log_messages) || $code != 200) {
             $message = [
@@ -161,9 +202,9 @@ class LazyTestService {
           $completedRequests++;
           $progressBar->setProgress($completedRequests);
         },
-        'rejected' => function ($reason, $index) use ($output, $urls, $startTimestamp, &$messages, &$completedRequests, $progressBar) {
+        'rejected' => function ($reason, $index) use ($output, $layers, $i, $startTimestamp, &$messages, &$completedRequests, $progressBar) {
           $code = $reason->getCode();
-          $url = $urls[$index];
+          $url = $layers[$i][$index];
           $log_messages = $this->getLogMessages($url, $startTimestamp);
           $message = [
             'source' => $url["source"],
@@ -212,7 +253,7 @@ class LazyTestService {
 
   }
 
-  public function createAbsoluteUrlIfInternal($href, $currentUrl) {
+  public function createAbsoluteUrlIfInternal($href, $currentUrl, $baseurl) {
     // If $href is an empty string, ignore.
     if (empty($href)) {
       return null;
@@ -241,12 +282,12 @@ class LazyTestService {
       $absoluteUrl = $href;
     } else {
       // Convert relative URLs to absolute
-      $absoluteUrl = $this->createAbsoluteUrl($href, $currentUrl);
+      $absoluteUrl = $this->createAbsoluteUrl($href, $currentUrl, $baseurl);
     }
 
     // Check if the URL is an internal link
     $parsedAbsoluteUrl = parse_url($absoluteUrl);
-    $baseHost = parse_url(BASE_URL, PHP_URL_HOST);
+    $baseHost = parse_url($baseurl, PHP_URL_HOST);
     if (isset($parsedAbsoluteUrl['host']) && $parsedAbsoluteUrl['host'] !== $baseHost) {
       return null;
     }
@@ -275,17 +316,17 @@ class LazyTestService {
     return $url;
   }
 
-  private function createAbsoluteUrl($relativeUrl, $currentUrl) {
+  private function createAbsoluteUrl($relativeUrl, $currentUrl, $baseurl) {
     if ($relativeUrl === '/') {
       // If the relative URL is "/", return the base URL
-      return BASE_URL;
+      return $baseurl;
     } else if (strpos($relativeUrl, '/') === 0) {
-      return Url::fromUri(BASE_URL . $relativeUrl)->setAbsolute()->toString();
+      return Url::fromUri($baseurl . $relativeUrl)->setAbsolute()->toString();
     } else if (filter_var($relativeUrl, FILTER_VALIDATE_URL)) {
       // If the relative URL is already an absolute URL, return it as is
       return $relativeUrl;
     } else {
-      return Url::fromUri(BASE_URL . '/' . $currentUrl . '/' . $relativeUrl)->setAbsolute()->toString();
+      return Url::fromUri($baseurl . '/' . $currentUrl . '/' . $relativeUrl)->setAbsolute()->toString();
     }
   }
 
