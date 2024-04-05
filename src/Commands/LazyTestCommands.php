@@ -59,6 +59,7 @@ class LazyTestCommands extends DrushCommands {
       $availablePlugins = $this->urlProviderManager->getDefinitions();
       $pluginChoices = [];
       $pluginChoices["none"] = "None";
+      $pluginChoices["all"] = "All";
       foreach ($availablePlugins as $plugin) {
         $pluginChoices[$plugin['id']] = $plugin['label']->render();
       }

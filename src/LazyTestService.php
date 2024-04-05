@@ -38,7 +38,7 @@ class LazyTestService {
     }
 
     // Use all plugins or just the one(s) coming in from the command line.
-    if (empty($plugins)) {
+    if ($plugins == "all" || empty($plugins)) {
       $definitions = $this->urlProviderManager->getDefinitions();
       foreach ($definitions as $definition) {
         $instance = $this->urlProviderManager->createInstance($definition['id']);
