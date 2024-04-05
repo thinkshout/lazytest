@@ -24,7 +24,6 @@ class RouteURLProvider extends URLProviderBase {
     $custom_modules = [];
     foreach ($modules as $module) {
       // @todo: make path a parameter (core, contrib, custom?)
-      $foo = $module->getPath();
       if (strpos($module->getPath(), '/custom/') !== FALSE) {
         $custom_modules[] = $module->getName();
       }
@@ -92,13 +91,7 @@ class RouteURLProvider extends URLProviderBase {
           continue;
         }
 
-        $url_object = Url::fromRoute($route_name);
-        $url_object->setAbsolute();
-        $urls[] = [
-          'source' => "routes",
-          'subsource' => $route_name,
-          'url' => $url_object->toString(),
-        ];
+        $urls[] = $this->createUrlFromRoute($route_name, [], 'routes', $route_name);
 
       } catch (\Exception $e) {
         // Not all routes will be able to be converted into URLs,

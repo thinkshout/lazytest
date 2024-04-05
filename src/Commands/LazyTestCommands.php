@@ -74,6 +74,9 @@ class LazyTestCommands extends DrushCommands {
     // Replace base url if provided
     if (!empty($baseurl)) {
       foreach ($urls as &$url) {
+        if (empty($url)) {
+          continue;
+        }
         $parsedUrl = parse_url($url['url']);
         $parsedUrl['scheme'] = parse_url($baseurl, PHP_URL_SCHEME);
         $parsedUrl['host'] = parse_url($baseurl, PHP_URL_HOST);
@@ -88,6 +91,9 @@ class LazyTestCommands extends DrushCommands {
 
     // Normalize all URLs before processing.
     foreach ($urls as &$url) {
+      if (empty($url)) {
+        continue;
+      }
       $url['url'] = $this->lazyTestService->normalizeUrl($url['url']);
     }
     unset($url);
@@ -98,7 +104,7 @@ class LazyTestCommands extends DrushCommands {
     });
 
     // Filter out non-unique urls.
-    array_multisort(array_column($urls, 'url'), SORT_ASC, $urls);
+      array_multisort(array_column($urls, 'url'), SORT_ASC, $urls);
     $urls = array_intersect_key(
       $urls,
       array_unique(array_column($urls, 'url'))

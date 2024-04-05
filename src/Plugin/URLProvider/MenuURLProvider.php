@@ -16,22 +16,20 @@ use Drupal\lazytest\Plugin\URLProviderBase;
 class MenuURLProvider extends URLProviderBase {
 
   public function getURLs() {
-    $urls = [];
-    $menus = \Drupal::entityTypeManager()->getStorage('menu_link_content')->loadMultiple();
-
-    foreach ($menus as $menu) {
-      if ($menu->isEnabled()) {
-        $link = $menu->get('link')->first()->getUrl();
-        $link->setAbsolute();
-        $urls[] = [
-          'source' => "menu",
-          'subsource' => $menu->label(),
-          'url' => $link->toString(),
-        ];
-      }
-    }
-
-    return $urls;
+    return $this->loadEntitiesAndCreateURLs(
+      '',
+      'menu_link_content',
+      [
+        [
+          'field' => 'enabled',
+          'value' => 1
+        ]
+      ],
+      '',
+      [''],
+      0,
+      'menu',
+      ''
+    );
   }
-
 }

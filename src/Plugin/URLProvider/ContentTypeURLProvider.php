@@ -4,7 +4,6 @@ namespace Drupal\lazytest\Plugin\URLProvider;
 
 use Drupal\Core\Url;
 use Drupal\lazytest\Plugin\URLProviderBase;
-use Drupal\node\NodeStorageInterface;
 
 /**
  * Provides a 'Content Type' URLProvider.
@@ -16,41 +15,28 @@ use Drupal\node\NodeStorageInterface;
  */
 class ContentTypeURLProvider extends URLProviderBase {
 
+  /**
+   * {@inheritdoc}
+   */
   public function getURLs() {
-    $urls = [];
-    $nodeTypes = \Drupal::entityTypeManager()->getStorage('node_type')->loadMultiple();
-
-    // Get oldest and newest.
-    $sorts = [
-      'DESC',
-      'ASC',
-    ];
-
-    foreach ($nodeTypes as $nodeType) {
-
-      foreach ($sorts as $sort) {
-        $nids = \Drupal::entityTypeManager()->getStorage('node')->getQuery()
-          ->accessCheck(FALSE)
-          ->condition('status', 1)
-          ->condition('type', $nodeType->id())
-          ->sort('nid', $sort)
-          ->range(0, 10)
-          ->execute();
-
-        foreach ($nids as $nid) {
-          $url_object = Url::fromRoute('entity.node.canonical', ['node' => $nid]);
-          $url_object->setAbsolute();
-          $nodeTypeId = $nodeType->id();
-          $urls[] = [
-            'source' => "content",
-            'subsource' => $nodeTypeId,
-            'url' => $url_object->toString(),
-          ];
-        }
-      }
-
-    }
-
-    return $urls;
+    return $this->loadEntitiesAndCreateURLs(
+      'node_type',
+      'node',
+      [
+        [
+          'field' => 'type',
+          'value' => '#entity_bundle'
+        ],
+        [
+          'field' => 'status',
+          'value' => 1
+        ]
+      ],
+      'nid',
+      ['DESC', 'ASC',],
+      10,
+      'node',
+      '#entity_bundle'
+    );
   }
 }
