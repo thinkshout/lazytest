@@ -19,8 +19,7 @@ class RouteURLProvider extends URLProviderBase {
   public function getURLs() {
 
     // Get list of custom modules.
-    $moduleHandler = \Drupal::service('module_handler');
-    $modules = $moduleHandler->getModuleList();
+    $modules = $this->moduleHandler->getModuleList();
     $custom_modules = [];
     foreach ($modules as $module) {
       // @todo: make path a parameter (core, contrib, custom?)
@@ -30,7 +29,7 @@ class RouteURLProvider extends URLProviderBase {
     }
 
     $urls = [];
-    $routes = \Drupal::service('router.route_provider')->getAllRoutes();
+    $routes = $this->routeProvider->getAllRoutes();
 
     foreach ($routes as $route_name => $route) {
       try {

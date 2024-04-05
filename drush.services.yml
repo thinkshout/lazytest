@@ -5,6 +5,6 @@ services:
     parent: default_plugin_manager
   lazytest.commands:
     class: \Drupal\lazytest\Commands\LazyTestCommands
-    arguments: ['@lazytest.lazy_test_service', '@plugin.manager.lazytest.url_provider']
+    arguments: ['@lazytest.lazy_test_service', '@plugin.manager.lazytest.url_provider', '@entity_type.manager', '@module_handler', '@router.route_provider']
     tags:
       - { name: drush.command }
