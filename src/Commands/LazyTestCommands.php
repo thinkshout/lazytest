@@ -38,8 +38,10 @@ class LazyTestCommands extends DrushCommands {
    * @option plugins A comma-separated list of URL Providers to use.
    * @option crawl Enable crawl mode.
    * @option crawldepth Set crawl depth.
+   * @option userid Request URLs as this user (number).
+   *
    */
-  public function run($options = ['baseurl' => NULL, 'urls' => NULL, 'plugins' => NULL, 'crawl' => FALSE, 'crawldepth' => 0]) {
+  public function run($options = ['baseurl' => NULL, 'urls' => NULL, 'plugins' => NULL, 'crawl' => FALSE, 'crawldepth' => 0, 'userid' => NULL]) {
 
     // Check if all options are NULL or not set
     if ($options['baseurl'] === NULL && $options['urls'] === NULL && $options['plugins'] === NULL && $options['crawl'] === FALSE && $options['crawldepth'] === 0) {
@@ -51,6 +53,7 @@ class LazyTestCommands extends DrushCommands {
       // Start asking the user for input
       // @todo: set baseurl to NULL.
       $options['baseurl'] = $this->io()->ask('(baseurl) override the base URL in case Drupal doesn\'t return the right one', NULL);
+      $options['userid'] = $this->io()->ask('(userid) user to log in as (number)', NULL);
       $options['urls'] = $this->io()->ask('(urls) a comma-separated list of URLs to test', NULL);
       $options['crawl'] = $this->io()->confirm('(crawl) follow internal links to test additional pages', false);
       if ($options['crawl']) {
@@ -122,7 +125,7 @@ class LazyTestCommands extends DrushCommands {
       return strpos($item['url'], '/user/logout') === false;
     });
 
-    $this->lazyTestService->checkURLs($baseurl, $urls, $options["crawl"], $options["crawldepth"]);
+    $this->lazyTestService->checkURLs($baseurl, $urls, $options["crawl"], $options["crawldepth"], $options["userid"]);
   }
 
 }

@@ -61,7 +61,7 @@ class LazyTestService {
     return $allURLs;
   }
 
-  public function checkURLs($baseurl, $urls, $crawl, $crawldepth) {
+  public function checkURLs($baseurl, $urls, $crawl, $crawldepth, $userid) {
 
     $output = new ConsoleOutput();
 
@@ -79,39 +79,41 @@ class LazyTestService {
 
     $allUrls = array_column($urls, 'url');
 
-    $client = new Client([
-      'base_uri' => $baseurl,
-      'verify' => false, // Ignore SSL certificate errors
-      'defaults' => [
-        'headers' => [
-          'Connection' => 'keep-alive',
+    if ($userid !== NULL) {
+      $client = new Client([
+        'base_uri' => $baseurl,
+        'verify' => false, // Ignore SSL certificate errors
+        'defaults' => [
+          'headers' => [
+            'Connection' => 'keep-alive',
+          ],
         ],
-      ],
-    ]);
-    $jar = new CookieJar;
+      ]);
+      $jar = new CookieJar;
 
-    // Create a one-time login link for user 1
-    $user = \Drupal\user\Entity\User::load(1);
-    $timestamp = \Drupal::time()->getRequestTime();
-    $link = Url::fromRoute(
-      'user.reset.login',
-      [
-        'uid' => $user->id(),
-        'timestamp' => $timestamp,
-        'hash' => user_pass_rehash($user, $timestamp),
-      ],
-    )->toString();
+      // Create a one-time login link for user 1
+      $user = \Drupal\user\Entity\User::load($userid);
+      $timestamp = \Drupal::time()->getRequestTime();
+      $link = Url::fromRoute(
+        'user.reset.login',
+        [
+          'uid' => $user->id(),
+          'timestamp' => $timestamp,
+          'hash' => user_pass_rehash($user, $timestamp),
+        ],
+      )->toString();
 
-    // Use the one-time login link and get the cookies.
-    $client->request('GET', $link, ['cookies' => $jar]);
-    $cookies = $jar->toArray();
+      // Use the one-time login link and get the cookies.
+      $client->request('GET', $link, ['cookies' => $jar]);
+      $cookies = $jar->toArray();
 
-    // Extract the session cookie name and value
-    $session_cookie = '';
-    foreach ($cookies as $cookie) {
-      if (strpos($cookie['Name'], 'SESS') === 0) {
-        $session_cookie = $cookie['Name'] . '=' . $cookie['Value'];
-        break;
+      // Extract the session cookie name and value
+      $session_cookie = NULL;
+      foreach ($cookies as $cookie) {
+        if (strpos($cookie['Name'], 'SESS') === 0) {
+          $session_cookie = $cookie['Name'] . '=' . $cookie['Value'];
+          break;
+        }
       }
     }
 
@@ -136,10 +138,12 @@ class LazyTestService {
       $promises = function () use (&$layers, $client, $session_cookie, $i, &$allUrls, $baseurl, $crawl, $crawldepth) {
         foreach ($layers[$i] as $index => $url) {
           yield $index => function () use (&$layers, $client, $url, $session_cookie, $i, &$allUrls, $baseurl, $crawl, $crawldepth) {
+            $headers = [];
+            if ($session_cookie !== NULL) {
+              $headers['Cookie'] = $session_cookie;
+            }
             $requestPromise = $client->requestAsync('GET', $url["url"], [
-              'headers' => [
-                'Cookie' => $session_cookie,
-              ],
+              'headers' => $headers,
               'timeout' => 120,
               'allow_redirects' => [
                 'max' => 20,
