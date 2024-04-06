@@ -3,7 +3,7 @@
     "description": "Testing for lazy people",
     "type": "drupal-module",
     "require": {
-        "guzzlehttp/promises": "^1.4"
+        "guzzlehttp/promises": "^2.0"
     },
     "extra": {
         "drupal": {
