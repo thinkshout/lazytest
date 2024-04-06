@@ -50,7 +50,7 @@ class LazyTestCommands extends DrushCommands {
 
       // Start asking the user for input
       // @todo: set baseurl to NULL.
-      $options['baseurl'] = $this->io()->ask('(baseurl) override the base URL in case Drupal doesn\'t return the right one', 'http://web.lvhn.localhost');
+      $options['baseurl'] = $this->io()->ask('(baseurl) override the base URL in case Drupal doesn\'t return the right one', NULL);
       $options['urls'] = $this->io()->ask('(urls) a comma-separated list of URLs to test', NULL);
       $options['crawl'] = $this->io()->confirm('(crawl) follow internal links to test additional pages', false);
       if ($options['crawl']) {
