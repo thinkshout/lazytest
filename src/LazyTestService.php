@@ -79,19 +79,21 @@ class LazyTestService {
 
     $allUrls = array_column($urls, 'url');
 
-    if ($userid !== NULL) {
-      $client = new Client([
-        'base_uri' => $baseurl,
-        'verify' => false, // Ignore SSL certificate errors
-        'defaults' => [
-          'headers' => [
-            'Connection' => 'keep-alive',
-          ],
+    $session_cookie = NULL;
+    $client = new Client([
+      'base_uri' => $baseurl,
+      'verify' => false, // Ignore SSL certificate errors
+      'defaults' => [
+        'headers' => [
+          'Connection' => 'keep-alive',
         ],
-      ]);
+      ],
+    ]);
+    if ($userid !== NULL) {
+
       $jar = new CookieJar;
 
-      // Create a one-time login link for user 1
+      // Create a one-time login link.
       $user = \Drupal\user\Entity\User::load($userid);
       $timestamp = \Drupal::time()->getRequestTime();
       $link = Url::fromRoute(
@@ -108,7 +110,6 @@ class LazyTestService {
       $cookies = $jar->toArray();
 
       // Extract the session cookie name and value
-      $session_cookie = NULL;
       foreach ($cookies as $cookie) {
         if (strpos($cookie['Name'], 'SESS') === 0) {
           $session_cookie = $cookie['Name'] . '=' . $cookie['Value'];
