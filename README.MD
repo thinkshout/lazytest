@@ -1,19 +1,22 @@
 Goal:
 A testing tool that is easy to set up, easy to use, easy to maintain.
 
+Usage:
+- drush lazytest:run
+
 Functionalities:
 - Implemented as a Drupal module which provides a drush command.
 - The drush command generates:
   - CSV output which can be imported into a spreadsheet (source, status code, url, message)
   - Error analysis (consolidated for quicker fixes)
 - Various URL Providers supply urls to test
-  - Content Types (10 old and 10 new nodes from each bundle)
-  - Files (10 old and 10 new files)
-  - Media (10 old and 10 new Media pages)
+  - Nodes (some old and new nodes from each Content Type)
+  - Files (some old and new File Entities)
+  - Media (some old and new Media Entities of each Media Type)
   - Menu (all menu items)
-  - Routes (filtered list of all route urls)
-  - Taxonomy (10 old and 10 new term pages from each vocabulary)
-  - Users (10 old and 10 new users)
+  - Routes (all route urls for custom modules)
+  - Taxonomy (some old and new Terms from each Taxonomy Vocabulary)
+  - Users (some old and new users)
   - Views (all view urls)
   - Future ideas:
     - Google Analytics (top 100 pages)
