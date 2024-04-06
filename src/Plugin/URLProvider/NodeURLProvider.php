@@ -2,18 +2,17 @@
 
 namespace Drupal\lazytest\Plugin\URLProvider;
 
-use Drupal\Core\Url;
 use Drupal\lazytest\Plugin\URLProviderBase;
 
 /**
- * Provides a 'Content Type' URLProvider.
+ * Provides a 'Node' URLProvider.
  *
  * @URLProvider(
- *   id = "content_type",
- *   label = @Translation("(content_type) 10 newest and 10 oldest published nodes from each Content Type."),
+ *   id = "node",
+ *   label = @Translation("(node) 10 newest and 10 oldest published nodes from each Content Type."),
  * )
  */
-class ContentTypeURLProvider extends URLProviderBase {
+class NodeURLProvider extends URLProviderBase {
 
   /**
    * {@inheritdoc}
