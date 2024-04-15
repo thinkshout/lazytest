@@ -17,6 +17,8 @@ class LazyTestCommands extends DrushCommands {
   }
 
   /**
+   * Displays the list of available plugins for lazytest.
+   *
    * @command lazytest:plugins
    * @aliases ltp
    */
@@ -31,6 +33,8 @@ class LazyTestCommands extends DrushCommands {
   }
 
   /**
+   * Runs lazytests.
+   *
    * @command lazytest:run
    * @aliases ltr
    * @option baseurl A base url to override the base url from Drupal.
