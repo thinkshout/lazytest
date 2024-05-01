@@ -111,7 +111,7 @@ class LazyTestService {
 
       // Extract the session cookie name and value
       foreach ($cookies as $cookie) {
-        if (strpos($cookie['Name'], 'SESS') === 0) {
+        if (strpos($cookie['Name'], 'SESS') === 0 || strpos($cookie['Name'], 'SSESS') === 0) {
           $session_cookie = $cookie['Name'] . '=' . $cookie['Value'];
           break;
         }
