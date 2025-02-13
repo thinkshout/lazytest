@@ -1,8 +1,7 @@
 import os
 import re
 import sys
-import hashlib
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, urlunparse
 
 import scrapy
 from scrapy.crawler import CrawlerProcess
@@ -12,14 +11,14 @@ from scrapy.exceptions import DontCloseSpider
 import pypandoc  # For HTML-to-Markdown conversion
 from scrapy_playwright.page import PageMethod  # For intercepting requests
 
-from bs4 import BeautifulSoup  # For cleaning HTML
+from bs4 import BeautifulSoup  # For cleaning HTML and checking language
 
 
 class DualDomainSpider(scrapy.Spider):
     name = "dual_domain_spider"
 
     custom_settings = {
-        # Use Playwright for HTTP and HTTPS
+        # Use Playwright for HTTP and HTTPS.
         "DOWNLOAD_HANDLERS": {
             "http": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
             "https": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
@@ -33,6 +32,7 @@ class DualDomainSpider(scrapy.Spider):
         "COOKIES_ENABLED": False,
         "DOWNLOAD_DELAY": 0,
         "DOWNLOAD_TIMEOUT": 60,
+        "PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT": 60000,
         "LOG_LEVEL": "INFO",
         "AUTOTHROTTLE_ENABLED": True,
         "AUTOTHROTTLE_START_DELAY": 2,
@@ -41,13 +41,15 @@ class DualDomainSpider(scrapy.Spider):
         "AUTOTHROTTLE_DEBUG": False,
     }
 
-    def __init__(self, crawl_depth, url1, url2, save_screenshots="false", *args, **kwargs):
+    def __init__(self, crawl_depth, url1, url2, save_screenshots="false",
+                 same_page_with_url_parameters=False, lang="", *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.crawl_depth = int(crawl_depth)
         self.start_url1 = url1
         self.url2 = url2
-        # Convert the save_screenshots parameter to boolean.
         self.save_screenshots = str(save_screenshots).lower() in ("true", "1", "yes")
+        self.same_page_with_url_parameters = same_page_with_url_parameters
+        self.target_lang = lang.lower() if lang else None
 
         # Phase 1 pages (url1) follow links; phase 2 pages (url2) do not.
         self.phase = 1
@@ -57,14 +59,17 @@ class DualDomainSpider(scrapy.Spider):
         self.domain1 = self.get_domain(url1)
         self.domain2 = self.get_domain(url2)
 
-        # Create output folders for each domain under output/html, output/text, and output/screenshots.
+        # Create output folders under output/html, output/text, and output/screenshots.
         for sub in ["html", "text", "screenshots"]:
             for domain in [self.domain1, self.domain2]:
                 os.makedirs(os.path.join("output", sub, domain), exist_ok=True)
 
-        # Extract basic‑auth credentials if provided.
         self.auth1 = self.get_auth_info(url1)
         self.auth2 = self.get_auth_info(url2)
+
+        # Sets for deduplication.
+        self.seen_normalized_1 = set()
+        self.seen_normalized_2 = set()
 
     def get_domain(self, url):
         parsed = urlparse(url)
@@ -90,10 +95,9 @@ class DualDomainSpider(scrapy.Spider):
             "phase": phase,
             "depth": depth,
             "playwright_page_methods": [
-                PageMethod("route", "**/*", DualDomainSpider.block_unwanted_resources)
+                PageMethod("route", "**/*", DualDomainSpider.block_unwanted_resources),
             ],
         }
-        # If screenshot saving is enabled, include the playwright page object.
         if self.save_screenshots:
             meta["playwright_include_page"] = True
         if auth:
@@ -101,24 +105,49 @@ class DualDomainSpider(scrapy.Spider):
         return meta
 
     def get_output_filepath(self, domain, url, subfolder, default_ext):
-        """
-        Build an output filepath as:
-        output/<subfolder>/<domain>/<sanitized relative path + default_ext>
-        """
-        parsed = urlparse(url)
-        rel_path = parsed.path
-        if rel_path.endswith("/") or not rel_path:
-            rel_path += "index" + default_ext
-        else:
-            if not os.path.splitext(rel_path)[1]:
-                rel_path += default_ext
-            else:
-                rel_path = os.path.splitext(rel_path)[0] + default_ext
-        rel_path = self.sanitize_path(rel_path.lstrip("/"))
-        return os.path.join("output", subfolder, domain, rel_path)
+        """Build an output filepath: output/<subfolder>/<domain>/<sanitized relative path + default_ext>."""
+        relative = self.get_relative_path(url)
+        return os.path.join("output", subfolder, domain, self.sanitize_path(relative) + default_ext)
 
     def sanitize_path(self, path):
         return re.sub(r'[<>:"/\\|?*]', "_", path)
+
+    def get_relative_path(self, url):
+        """
+        Build a relative file path from the URL.
+        This version appends the query string (if any) to the URL's path.
+        For example:
+          /search?foo=bar becomes search_foo=bar
+        """
+        parsed = urlparse(url)
+        path = parsed.path or "/"
+        path = path.lstrip("/")
+        if parsed.query:
+            path += "_" + parsed.query
+        return path
+
+    def get_request_relative_url(self, url):
+        """Return the exact relative URL (path plus query) for the request."""
+        parsed = urlparse(url)
+        relative = parsed.path
+        if parsed.query:
+            relative += "?" + parsed.query
+        return relative
+
+    def normalize_url(self, url):
+        """
+        Normalize the URL for deduplication.
+        If self.same_page_with_url_parameters is True, return path + query.
+        Otherwise, return just the path.
+        """
+        parsed = urlparse(url)
+        if self.same_page_with_url_parameters:
+            relative = parsed.path
+            if parsed.query:
+                relative += "?" + parsed.query
+            return relative
+        else:
+            return parsed.path
 
     def start_requests(self):
         yield scrapy.Request(
@@ -136,6 +165,28 @@ class DualDomainSpider(scrapy.Spider):
         current_depth = response.meta.get("depth", 0)
         base_domain = self.domain1 if phase == 1 else self.domain2
 
+        # Check language if target_lang is set.
+        if self.target_lang:
+            soup = BeautifulSoup(response.text, "html.parser")
+            html_tag = soup.find("html")
+            page_lang = html_tag.get("lang", "").lower() if html_tag else ""
+            if page_lang != self.target_lang:
+                self.logger.info(f"Skipping page with lang '{page_lang}' (target: {self.target_lang}). URL: {response.url}")
+                return
+
+        # Deduplicate based on normalized URL.
+        normalized = self.normalize_url(response.url)
+        if phase == 1:
+            if normalized in self.seen_normalized_1:
+                self.logger.info(f"Skipping duplicate phase 1 URL: {normalized}")
+                return
+            self.seen_normalized_1.add(normalized)
+        else:
+            if normalized in self.seen_normalized_2:
+                self.logger.info(f"Skipping duplicate phase 2 URL: {normalized}")
+                return
+            self.seen_normalized_2.add(normalized)
+
         # Save HTML and Markdown.
         self.save_html(response, base_domain)
         self.save_markdown(response, base_domain)
@@ -144,13 +195,12 @@ class DualDomainSpider(scrapy.Spider):
         if self.save_screenshots:
             await self.save_screenshot(response, base_domain)
 
-        # Log the current queue size.
         self.log_queue_size()
 
         if phase == 1:
-            # Immediately schedule the same page from url2.
-            relative = self.get_relative_path(response.url)
-            abs_url2 = urljoin(self.url2, relative)
+            # Schedule the same page from url2 using the exact relative URL.
+            relative_request = self.get_request_relative_url(response.url)
+            abs_url2 = urljoin(self.url2, relative_request)
             yield scrapy.Request(
                 url=abs_url2,
                 callback=self.parse_page,
@@ -169,7 +219,6 @@ class DualDomainSpider(scrapy.Spider):
                     parsed = urlparse(abs_url)
                     if parsed.hostname != self.domain1:
                         continue
-                    self.discovered_paths.add(self.get_relative_path(abs_url))
                     yield scrapy.Request(
                         url=abs_url,
                         callback=self.parse_page,
@@ -184,14 +233,6 @@ class DualDomainSpider(scrapy.Spider):
         )
         parsed = urlparse(url)
         return not any(parsed.path.lower().endswith(ext) for ext in non_html_ext)
-
-    def get_relative_path(self, url):
-        parsed = urlparse(url)
-        path = parsed.path or "/"
-        if parsed.query:
-            query_hash = hashlib.md5(parsed.query.encode("utf-8")).hexdigest()[:8]
-            path = path + ("index_" if path.endswith("/") else "_") + query_hash
-        return path
 
     def save_html(self, response, base_domain):
         file_path = self.get_output_filepath(base_domain, response.url, "html", ".html")
@@ -241,7 +282,6 @@ class DualDomainSpider(scrapy.Spider):
         await page.close()
 
     def log_queue_size(self):
-        # Retrieve enqueued and dequeued request counts from Scrapy stats.
         enqueued = self.crawler.stats.get_value("scheduler/enqueued")
         dequeued = self.crawler.stats.get_value("scheduler/dequeued")
         remaining = enqueued - dequeued if enqueued is not None and dequeued is not None else "unknown"
@@ -249,11 +289,24 @@ class DualDomainSpider(scrapy.Spider):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 4:
-        print("Usage: python script.py <crawl_depth> <url1> <url2> [save_screenshots]")
-        sys.exit(1)
-    crawl_depth, url1, url2 = sys.argv[1:4]
-    save_screenshots = sys.argv[4] if len(sys.argv) >= 5 else "false"
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Dual domain crawler with comparison functionality.")
+    parser.add_argument("--url1", required=True, help="Starting URL for domain 1.")
+    parser.add_argument("--url2", required=True, help="Starting URL for domain 2.")
+    parser.add_argument("--depth", type=int, default=2, help="Crawl depth.")
+    parser.add_argument("--screenshots", action="store_true", help="Enable saving screenshots.")
+    parser.add_argument("--same-page-with-url-parameters", action="store_true",
+                        help="Treat pages with different query parameters as distinct.")
+    parser.add_argument("--lang", default="", help="Only process pages with <html lang='X'> matching this language (e.g., 'en').")
+    args = parser.parse_args()
+
     process = CrawlerProcess()
-    process.crawl(DualDomainSpider, crawl_depth=crawl_depth, url1=url1, url2=url2, save_screenshots=save_screenshots)
+    process.crawl(DualDomainSpider,
+                  crawl_depth=args.depth,
+                  url1=args.url1,
+                  url2=args.url2,
+                  save_screenshots=str(args.screenshots).lower(),
+                  same_page_with_url_parameters=args.same_page_with_url_parameters,
+                  lang=args.lang)
     process.start()
