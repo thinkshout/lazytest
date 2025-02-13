@@ -1,3 +1,5 @@
 output/
 venv/
 .idea
+node_modules/
+reg.json

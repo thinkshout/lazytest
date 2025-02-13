@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "multicodec": "^0.5.6",
+    "reg-cli": "^0.18.10"
+  }
+}

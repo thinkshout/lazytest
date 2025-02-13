@@ -31,7 +31,13 @@ class DualDomainSpider(scrapy.Spider):
             "https": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
         },
         "TWISTED_REACTOR": "twisted.internet.asyncioreactor.AsyncioSelectorReactor",
-        "PLAYWRIGHT_LAUNCH_OPTIONS": {"headless": True},
+        "PLAYWRIGHT_LAUNCH_OPTIONS": {
+            "headless": True,
+            "args": [
+                "--disable-lcd-text",
+                "--disable-font-subpixel-positioning",
+            ]
+        },
         "ROBOTSTXT_OBEY": False,
         # Speed and AutoThrottle settings:
         "CONCURRENT_REQUESTS": 8,
@@ -48,31 +54,38 @@ class DualDomainSpider(scrapy.Spider):
         "AUTOTHROTTLE_DEBUG": False,
     }
 
-    def __init__(self, crawl_depth, url1, url2, save_screenshots="false",
+    def __init__(self, crawl_depth, reference, test, save_screenshots="false",
                  same_page_with_url_parameters=False, lang="", *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.crawl_depth = int(crawl_depth)
-        self.start_url1 = url1
-        self.url2 = url2
+        self.start_reference = reference
+        self.test = test
         self.save_screenshots = str(save_screenshots).lower() in ("true", "1", "yes")
         self.same_page_with_url_parameters = same_page_with_url_parameters
         self.target_lang = lang.lower() if lang else None
 
-        # Phase 1 pages (url1) follow links; phase 2 pages (url2) do not.
+        # Phase 1 pages (reference) follow links; phase 2 pages (test) do not.
         self.phase = 1
         self.discovered_paths = set()
 
         # Determine domains (credentials stripped).
-        self.domain1 = self.get_domain(url1)
-        self.domain2 = self.get_domain(url2)
+        self.domain1 = self.get_domain(reference)
+        self.domain2 = self.get_domain(test)
 
-        # Create output folders under output/html, output/text, and output/screenshots.
-        for sub in ["html", "text", "screenshots"]:
-            for domain in [self.domain1, self.domain2]:
-                os.makedirs(os.path.join("output", sub, domain), exist_ok=True)
+        # For html outputs, use fixed folders: 'reference' and 'test'
+        os.makedirs(os.path.join("output", "html", "reference"), exist_ok=True)
+        os.makedirs(os.path.join("output", "html", "test"), exist_ok=True)
 
-        self.auth1 = self.get_auth_info(url1)
-        self.auth2 = self.get_auth_info(url2)
+        # For text outputs, use fixed folders: 'reference' and 'test'
+        os.makedirs(os.path.join("output", "text", "reference"), exist_ok=True)
+        os.makedirs(os.path.join("output", "text", "test"), exist_ok=True)
+
+        # For screenshots, use fixed directories: 'reference' and 'test'
+        os.makedirs(os.path.join("output", "screenshots", "reference"), exist_ok=True)
+        os.makedirs(os.path.join("output", "screenshots", "test"), exist_ok=True)
+
+        self.auth1 = self.get_auth_info(reference)
+        self.auth2 = self.get_auth_info(test)
 
         # Sets for deduplication.
         self.seen_normalized_1 = set()
@@ -138,9 +151,13 @@ class DualDomainSpider(scrapy.Spider):
         return meta
 
     def get_output_filepath(self, domain, url, subfolder, default_ext):
-        """Build an output filepath: output/<subfolder>/<domain>/<sanitized relative path + default_ext>."""
+        """
+        Build a file path for saving output files.
+        """
         relative = self.get_relative_path(url)
-        return os.path.join("output", subfolder, domain, self.sanitize_path(relative) + default_ext)
+        sanitized = self.sanitize_path(relative)
+        folder = "reference" if domain == self.domain1 else "test"
+        return os.path.join("output", subfolder, folder, sanitized + default_ext)
 
     def sanitize_path(self, path):
         return re.sub(r'[<>:"/\\|?*]', "_", path)
@@ -184,7 +201,7 @@ class DualDomainSpider(scrapy.Spider):
 
     def start_requests(self):
         yield scrapy.Request(
-            url=self.start_url1,
+            url=self.start_reference,
             callback=self.parse_page,
             meta=self.build_meta(phase=1, depth=0, auth=self.auth1),
             errback=self.errback,
@@ -266,11 +283,11 @@ class DualDomainSpider(scrapy.Spider):
             await response.meta["playwright_page"].close()
 
         if phase == 1:
-            # Schedule the same page from url2 using the exact relative URL.
+            # Schedule the same page from test using the exact relative URL.
             relative_request = self.get_request_relative_url(response.url)
-            abs_url2 = urljoin(self.url2, relative_request)
+            abs_test = urljoin(self.test, relative_request)
             yield scrapy.Request(
-                url=abs_url2,
+                url=abs_test,
                 callback=self.parse_page,
                 meta=self.build_meta(phase=2, depth=current_depth, auth=self.auth2),
                 errback=self.errback,
@@ -377,8 +394,8 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Dual domain crawler with comparison functionality.")
-    parser.add_argument("--url1", required=True, help="Starting URL for domain 1.")
-    parser.add_argument("--url2", required=True, help="Starting URL for domain 2.")
+    parser.add_argument("--reference", required=True, help="Starting URL for domain 1.")
+    parser.add_argument("--test", required=True, help="Starting URL for domain 2.")
     parser.add_argument("--depth", type=int, default=2, help="Crawl depth.")
     parser.add_argument("--screenshots", action="store_true", help="Enable saving screenshots.")
     parser.add_argument("--same-page-with-url-parameters", action="store_true",
@@ -389,8 +406,8 @@ if __name__ == "__main__":
     process = CrawlerProcess()
     process.crawl(DualDomainSpider,
                   crawl_depth=args.depth,
-                  url1=args.url1,
-                  url2=args.url2,
+                  reference=args.reference,
+                  test=args.test,
                   save_screenshots=str(args.screenshots).lower(),
                   same_page_with_url_parameters=args.same_page_with_url_parameters,
                   lang=args.lang)
