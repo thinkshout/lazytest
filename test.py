@@ -1,6 +1,9 @@
 import os
 import re
 import sys
+import logging
+logging.getLogger("pypandoc").setLevel(logging.INFO)
+
 from urllib.parse import urlparse, urljoin, urlunparse
 
 import scrapy
@@ -158,9 +161,11 @@ class DualDomainSpider(scrapy.Spider):
         )
 
     def errback(self, failure):
-        self.logger.error(repr(failure))
+        request = failure.request
+        self.logger.error(f"Request failed: {request.url}. Error: {failure}")
 
     async def parse_page(self, response):
+        self.logger.info(f"Processing URL: {response.url}")
         phase = response.meta.get("phase", 1)
         current_depth = response.meta.get("depth", 0)
         base_domain = self.domain1 if phase == 1 else self.domain2
@@ -239,7 +244,6 @@ class DualDomainSpider(scrapy.Spider):
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         with open(file_path, "wb") as f:
             f.write(response.body)
-        self.logger.info(f"Saved HTML: {file_path}")
 
     def clean_html(self, html):
         soup = BeautifulSoup(html, "html.parser")
@@ -267,7 +271,6 @@ class DualDomainSpider(scrapy.Spider):
             markdown_text = "Conversion failed."
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(markdown_text)
-        self.logger.info(f"Saved Markdown: {file_path}")
 
     async def save_screenshot(self, response, base_domain):
         page = response.meta.get("playwright_page")
