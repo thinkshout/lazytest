@@ -144,6 +144,9 @@ class DualDomainSpider(scrapy.Spider):
         if self.save_screenshots:
             await self.save_screenshot(response, base_domain)
 
+        # Log the current queue size.
+        self.log_queue_size()
+
         if phase == 1:
             # Immediately schedule the same page from url2.
             relative = self.get_relative_path(response.url)
@@ -234,6 +237,15 @@ class DualDomainSpider(scrapy.Spider):
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         await page.screenshot(path=file_path, full_page=True)
         self.logger.info(f"Saved screenshot: {file_path}")
+        # Explicitly close the page to free up the concurrency slot.
+        await page.close()
+
+    def log_queue_size(self):
+        # Retrieve enqueued and dequeued request counts from Scrapy stats.
+        enqueued = self.crawler.stats.get_value("scheduler/enqueued")
+        dequeued = self.crawler.stats.get_value("scheduler/dequeued")
+        remaining = enqueued - dequeued if enqueued is not None and dequeued is not None else "unknown"
+        self.logger.info(f"Queue stats: enqueued={enqueued}, dequeued={dequeued}, remaining={remaining}")
 
 
 if __name__ == "__main__":
