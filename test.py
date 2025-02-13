@@ -1,9 +1,14 @@
+# Include way to do image diffs, maybe just reuse backstopJS functionality for that but use our output files.
+# Add logging for Drupal errors. How do we get those? Terminus? Database call?
+
 import os
 import re
 import sys
 import logging
 logging.getLogger("pypandoc").setLevel(logging.INFO)
-
+import json
+import csv
+import datetime
 from urllib.parse import urlparse, urljoin, urlunparse
 
 import scrapy
@@ -15,7 +20,6 @@ import pypandoc  # For HTML-to-Markdown conversion
 from scrapy_playwright.page import PageMethod  # For intercepting requests
 
 from bs4 import BeautifulSoup  # For cleaning HTML and checking language
-
 
 class DualDomainSpider(scrapy.Spider):
     name = "dual_domain_spider"
@@ -74,6 +78,30 @@ class DualDomainSpider(scrapy.Spider):
         self.seen_normalized_1 = set()
         self.seen_normalized_2 = set()
 
+        # For logging load metrics to CSV.
+        self.log_file_path = os.path.join("output", "log.txt")
+        self.log_handle = None  # Will be opened in spider_opened
+        self.log_writer = None
+
+    @classmethod
+    def from_crawler(cls, crawler, *args, **kwargs):
+        spider = super().from_crawler(crawler, *args, **kwargs)
+        crawler.signals.connect(spider.spider_opened, signal=signals.spider_opened)
+        crawler.signals.connect(spider.spider_closed, signal=signals.spider_closed)
+        return spider
+
+    def spider_opened(self, spider):
+        # Ensure output directory exists.
+        os.makedirs("output", exist_ok=True)
+        self.log_handle = open(self.log_file_path, "w", newline="", encoding="utf-8")
+        self.log_writer = csv.writer(self.log_handle)
+        # Write CSV header.
+        self.log_writer.writerow(["timestamp", "url", "response_code", "ttfb (ms)", "dom_content_loaded (ms)", "load_event (ms)", "network_idle (ms)"])
+
+    def spider_closed(self, spider):
+        if self.log_handle:
+            self.log_handle.close()
+
     def get_domain(self, url):
         parsed = urlparse(url)
         return parsed.hostname or "unknown_domain"
@@ -100,6 +128,8 @@ class DualDomainSpider(scrapy.Spider):
             "playwright_page_methods": [
                 PageMethod("route", "**/*", DualDomainSpider.block_unwanted_resources),
             ],
+            # To capture performance metrics, we ensure the page is included.
+            "playwright_include_page": True,
         }
         if self.save_screenshots:
             meta["playwright_include_page"] = True
@@ -192,15 +222,48 @@ class DualDomainSpider(scrapy.Spider):
                 return
             self.seen_normalized_2.add(normalized)
 
+        # Capture load-time metrics if a Playwright page is available.
+        metrics = {"ttfb": None, "dom_content_loaded": None, "load_event": None, "network_idle": None}
+        if "playwright_page" in response.meta:
+            page = response.meta["playwright_page"]
+            try:
+                # Use the performance.timing API to capture various load events.
+                performance_timing = await page.evaluate("() => JSON.stringify(window.performance.timing)")
+                performance_timing = json.loads(performance_timing)
+                navigation_start = performance_timing.get("navigationStart", 0)
+                response_start = performance_timing.get("responseStart", 0)
+                dom_content_loaded = performance_timing.get("domContentLoadedEventEnd", 0)
+                load_event = performance_timing.get("loadEventEnd", 0)
+                ttfb = response_start - navigation_start
+                dom_time = dom_content_loaded - navigation_start
+                load_time = load_event - navigation_start
+                # Wait for network idle and then get the current performance.now() value.
+                await page.wait_for_load_state("networkidle")
+                network_idle = await page.evaluate("() => performance.now()")
+                metrics = {
+                    "ttfb": ttfb,
+                    "dom_content_loaded": dom_time,
+                    "load_event": load_time,
+                    "network_idle": network_idle,
+                }
+            except Exception as e:
+                self.logger.error(f"Error capturing performance metrics for {response.url}: {e}")
+
+        # Log the metrics (CSV columns: timestamp, url, response code, ttfb, dom_content_loaded, load_event, network_idle).
+        self.log_load_metrics(response.url, response.status, metrics)
+
         # Save HTML and Markdown.
         self.save_html(response, base_domain)
         self.save_markdown(response, base_domain)
 
-        # If screenshots are enabled, save a screenshot.
+        # If screenshots are enabled, save a screenshot (this will close the page).
         if self.save_screenshots:
             await self.save_screenshot(response, base_domain)
 
         self.log_queue_size()
+
+        if "playwright_page" in response.meta and not self.save_screenshots:
+            await response.meta["playwright_page"].close()
 
         if phase == 1:
             # Schedule the same page from url2 using the exact relative URL.
@@ -284,12 +347,31 @@ class DualDomainSpider(scrapy.Spider):
         # Explicitly close the page to free up the concurrency slot.
         await page.close()
 
+    def log_load_metrics(self, url, response_code, metrics):
+        if self.log_writer:
+            timestamp = datetime.datetime.now().isoformat()
+            # Round each metric to the nearest whole number (milliseconds)
+            ttfb = round(metrics.get("ttfb", 0))
+            dom_content_loaded = round(metrics.get("dom_content_loaded", 0))
+            load_event = round(metrics.get("load_event", 0))
+            network_idle = round(metrics.get("network_idle", 0))
+
+            self.log_writer.writerow([
+                timestamp,
+                url,
+                response_code,
+                ttfb,
+                dom_content_loaded,
+                load_event,
+                network_idle,
+            ])
+            self.log_handle.flush()
+
     def log_queue_size(self):
         enqueued = self.crawler.stats.get_value("scheduler/enqueued")
         dequeued = self.crawler.stats.get_value("scheduler/dequeued")
         remaining = enqueued - dequeued if enqueued is not None and dequeued is not None else "unknown"
         self.logger.info(f"Queue stats: enqueued={enqueued}, dequeued={dequeued}, remaining={remaining}")
-
 
 if __name__ == "__main__":
     import argparse
