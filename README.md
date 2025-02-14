@@ -13,8 +13,7 @@ Allows for comparisons between test and reference.
   * Drupal logs (watchdog)
 
 ## Run tests with
-`python ./test.py --test=https://develop-site.pantheonsite.io --reference=https://test-site.pantheonsite.io --depth=1 --lang=en --screenshots`
-python ./test.py --test=https://develop-site.pantheonsite.io --reference=https://test-site.pantheonsite.io --depth=1 --lang=en --screenshots --remove-selectors="#id,.class" --reference-db="mysql://[username]:[password]@[host]:[port]/[database name]"
+`python ./test.py --test=https://develop-site.pantheonsite.io --reference=https://test-site.pantheonsite.io --depth=1 --lang=en --screenshots --remove-selectors="#id,.class" --reference-db="mysql://[username]:[password]@[host]:[port]/[database name]"`
 ```
 --test
   Test domain
