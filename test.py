@@ -21,7 +21,6 @@ class DualDomainSpider(scrapy.Spider):
     name = "dual_domain_spider"
 
     custom_settings = {
-        # Use Playwright for HTTP and HTTPS.
         "DOWNLOAD_HANDLERS": {
             "http": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
             "https": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
@@ -37,7 +36,6 @@ class DualDomainSpider(scrapy.Spider):
             ]
         },
         "ROBOTSTXT_OBEY": False,
-        # Speed and AutoThrottle settings:
         "CONCURRENT_REQUESTS": 8,
         "CONCURRENT_REQUESTS_PER_DOMAIN": 8,
         "COOKIES_ENABLED": False,
@@ -63,17 +61,14 @@ class DualDomainSpider(scrapy.Spider):
         self.same_page_with_url_parameters = same_page_with_url_parameters
         self.target_lang = lang.lower() if lang else None
 
-        # Parse DB connection strings.
         self.reference_db_config = self.parse_db_url(reference_db) if reference_db else None
         self.test_db_config = self.parse_db_url(test_db) if test_db else None
 
-        # Store the selectors to remove (split by comma)
         self.remove_selectors = [sel.strip() for sel in remove_selectors.split(",")] if remove_selectors else []
 
-        # Use a dict for deduplication: keys 1 and 2 for each phase.
+        # Deduplication sets for each phase.
         self.seen_normalized = {1: set(), 2: set()}
 
-        # Determine domains (credentials stripped).
         self.domain1 = self.get_domain(reference)
         self.domain2 = self.get_domain(test)
 
@@ -82,19 +77,17 @@ class DualDomainSpider(scrapy.Spider):
 
         self.create_output_dirs()
 
-        # For logging load metrics to CSV.
         self.log_file_path = os.path.join("output", "log.txt")
-        self.log_handle = None  # Will be opened in spider_opened
+        self.log_handle = None
         self.log_writer = None
 
     def create_output_dirs(self):
-        """Create output directories for html, text, and screenshots for both reference and test."""
+        """Create output directories for html, text, and screenshots for both domains."""
         base = "output"
         subfolders = ["html", "text", "screenshots"]
-        domains = ["reference", "test"]
         for sub in subfolders:
-            for domain in domains:
-                os.makedirs(os.path.join(base, sub, domain), exist_ok=True)
+            for folder in ["reference", "test"]:
+                os.makedirs(os.path.join(base, sub, folder), exist_ok=True)
         os.makedirs(base, exist_ok=True)
 
     @classmethod
@@ -129,7 +122,6 @@ class DualDomainSpider(scrapy.Spider):
 
     @staticmethod
     async def block_unwanted_resources(route, request):
-        # Allow only "document" and "script" resources.
         if request.resource_type not in {"document", "script"}:
             await route.abort()
         else:
@@ -150,7 +142,7 @@ class DualDomainSpider(scrapy.Spider):
         return meta
 
     def get_domain_folder(self, domain):
-        """Return the folder name ('reference' or 'test') for the given domain."""
+        """Return 'reference' if the domain matches the reference; otherwise, 'test'."""
         return "reference" if domain == self.domain1 else "test"
 
     def get_output_filepath(self, domain, url, subfolder, default_ext):
@@ -183,8 +175,29 @@ class DualDomainSpider(scrapy.Spider):
             if parsed.query:
                 relative += "?" + parsed.query
             return relative
-        else:
-            return parsed.path
+        return parsed.path
+
+    def should_skip_page_due_to_language(self, response):
+        """Return True if the page language does not match the target language."""
+        if self.target_lang:
+            soup = BeautifulSoup(response.text, "html.parser")
+            html_tag = soup.find("html")
+            page_lang = html_tag.get("lang", "").lower() if html_tag else ""
+            if page_lang != self.target_lang:
+                self.logger.info(
+                    f"Skipping page with lang '{page_lang}' (target: {self.target_lang}). URL: {response.request.url}"
+                )
+                return True
+        return False
+
+    def is_duplicate(self, response, phase):
+        """Return True if the normalized URL was already processed for the given phase."""
+        normalized = self.normalize_url(response.request.url)
+        if normalized in self.seen_normalized[phase]:
+            self.logger.info(f"Skipping duplicate phase {phase} URL: {normalized}")
+            return True
+        self.seen_normalized[phase].add(normalized)
+        return False
 
     def start_requests(self):
         yield scrapy.Request(
@@ -200,7 +213,6 @@ class DualDomainSpider(scrapy.Spider):
             response_code = failure.value.response.status
         except AttributeError:
             response_code = "N/A"
-
         self.logger.error(f"Request failed: {request.url}. Response code: {response_code}")
         timestamp = datetime.datetime.now().isoformat()
         if self.log_writer:
@@ -211,37 +223,29 @@ class DualDomainSpider(scrapy.Spider):
         self.logger.info(f"Processing URL: {response.request.url}")
         phase = response.meta.get("phase", 1)
         current_depth = response.meta.get("depth", 0)
-        base_domain = self.domain1 if phase == 1 else self.domain2
+        domain = self.domain1 if phase == 1 else self.domain2
 
-        # Check language if target_lang is set.
-        if self.target_lang:
-            soup = BeautifulSoup(response.text, "html.parser")
-            html_tag = soup.find("html")
-            page_lang = html_tag.get("lang", "").lower() if html_tag else ""
-            if page_lang != self.target_lang:
-                self.logger.info(f"Skipping page with lang '{page_lang}' (target: {self.target_lang}). URL: {response.request.url}")
-                return
-
-        # Deduplicate based on normalized URL.
-        normalized = self.normalize_url(response.request.url)
-        if normalized in self.seen_normalized[phase]:
-            self.logger.info(f"Skipping duplicate phase {phase} URL: {normalized}")
+        # Skip if language doesn’t match.
+        if self.should_skip_page_due_to_language(response):
             return
-        self.seen_normalized[phase].add(normalized)
+
+        # Deduplicate URL.
+        if self.is_duplicate(response, phase):
+            return
 
         metrics = await self.capture_performance_metrics(response)
         self.log_load_metrics(response.request.url, response.status, metrics, phase)
 
-        self.save_html(response, base_domain)
-        self.save_markdown(response, base_domain)
+        self.save_html(response, domain)
+        self.save_markdown(response, domain)
 
         if self.save_screenshots:
-            await self.process_screenshot(response, base_domain)
+            await self.process_screenshot(response, domain)
         elif "playwright_page" in response.meta:
             await response.meta["playwright_page"].close()
 
         if phase == 1:
-            # Schedule the same page from test.
+            # Schedule corresponding test page.
             relative_request = self.get_request_relative_url(response.request.url)
             abs_test = urljoin(self.test, relative_request)
             yield scrapy.Request(
@@ -251,7 +255,7 @@ class DualDomainSpider(scrapy.Spider):
                 errback=self.errback,
                 dont_filter=True,
             )
-            # Follow links if within crawl depth.
+            # Follow internal links if within crawl depth.
             if current_depth < self.crawl_depth:
                 for req in self.follow_internal_links(response, current_depth + 1):
                     yield req
@@ -264,12 +268,9 @@ class DualDomainSpider(scrapy.Spider):
                 timing_json = await page.evaluate("() => JSON.stringify(window.performance.timing)")
                 timing = json.loads(timing_json)
                 nav_start = timing.get("navigationStart", 0)
-                resp_start = timing.get("responseStart", 0)
-                dcl = timing.get("domContentLoadedEventEnd", 0)
-                load_evt = timing.get("loadEventEnd", 0)
-                metrics["ttfb"] = resp_start - nav_start
-                metrics["dom_content_loaded"] = dcl - nav_start
-                metrics["load_event"] = load_evt - nav_start
+                metrics["ttfb"] = timing.get("responseStart", 0) - nav_start
+                metrics["dom_content_loaded"] = timing.get("domContentLoadedEventEnd", 0) - nav_start
+                metrics["load_event"] = timing.get("loadEventEnd", 0) - nav_start
                 await page.wait_for_load_state("networkidle")
                 metrics["network_idle"] = await page.evaluate("() => performance.now()")
             except Exception as e:
@@ -299,23 +300,23 @@ class DualDomainSpider(scrapy.Spider):
         )
         return not any(urlparse(url).path.lower().endswith(ext) for ext in non_html_ext)
 
-    def save_html(self, response, base_domain):
-        file_path = self.get_output_filepath(base_domain, response.request.url, "html", ".html")
+    def save_html(self, response, domain):
+        file_path = self.get_output_filepath(domain, response.request.url, "html", ".html")
         self.write_file(file_path, response.body, binary=True)
 
     def clean_html(self, html):
         soup = BeautifulSoup(html, "html.parser")
         for tag in soup.find_all(['script', 'style', 'img']):
             tag.decompose()
-        while soup.find_all('div'):
-            for tag in soup.find_all('div'):
-                tag.unwrap()
+        # Unwrap all <div> elements (in case of nested wrappers)
+        for tag in soup.find_all('div'):
+            tag.unwrap()
         for tag in soup.find_all():
             tag.attrs = {}
         return str(soup)
 
-    def save_markdown(self, response, base_domain):
-        file_path = self.get_output_filepath(base_domain, response.request.url, "text", ".md")
+    def save_markdown(self, response, domain):
+        file_path = self.get_output_filepath(domain, response.request.url, "text", ".md")
         try:
             cleaned_html = self.clean_html(response.text)
             markdown_text = pypandoc.convert_text(cleaned_html, 'md', format='html')
@@ -325,17 +326,22 @@ class DualDomainSpider(scrapy.Spider):
             markdown_text = "Conversion failed."
         self.write_file(file_path, markdown_text, binary=False)
 
-    async def process_screenshot(self, response, base_domain):
+    async def remove_unwanted_selectors(self, page):
+        """Remove CSS selectors specified in self.remove_selectors from the page."""
+        for sel in self.remove_selectors:
+            await page.evaluate(
+                f"""() => {{
+                    document.querySelectorAll('{sel}').forEach(e => e.remove());
+                }}"""
+            )
+
+    async def process_screenshot(self, response, domain):
         page = response.meta.get("playwright_page")
         if not page:
             self.logger.error("No playwright_page in meta for screenshot!")
             return
-        # Remove unwanted elements if selectors were provided.
-        for sel in self.remove_selectors:
-            await page.evaluate(f"""() => {{
-                document.querySelectorAll('{sel}').forEach(e => e.remove());
-            }}""")
-        file_path = self.get_output_filepath(base_domain, response.request.url, "screenshots", ".png")
+        await self.remove_unwanted_selectors(page)
+        file_path = self.get_output_filepath(domain, response.request.url, "screenshots", ".png")
         await page.screenshot(path=file_path, full_page=True)
         self.logger.info(f"Saved screenshot: {file_path}")
         await page.close()
@@ -403,7 +409,7 @@ class DualDomainSpider(scrapy.Spider):
 
     def normalize_watchdog_url(self, url):
         parsed = urlparse(url)
-        return parsed.path  # Only the relative path is needed.
+        return parsed.path
 
 
 if __name__ == "__main__":
