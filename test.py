@@ -1,26 +1,21 @@
-
 import os
 import re
-import sys
 import logging
-logging.getLogger("pypandoc").setLevel(logging.INFO)
 import json
 import csv
 import datetime
 import pymysql
 
-from urllib.parse import urlparse, urljoin, urlunparse
-
+from urllib.parse import urlparse, urljoin
 import scrapy
 from scrapy.crawler import CrawlerProcess
 from scrapy import signals
 from scrapy.exceptions import DontCloseSpider
-from urllib.parse import urlparse
 
 import pypandoc  # For HTML-to-Markdown conversion
 from scrapy_playwright.page import PageMethod  # For intercepting requests
-
 from bs4 import BeautifulSoup  # For cleaning HTML and checking language
+
 
 class DualDomainSpider(scrapy.Spider):
     name = "dual_domain_spider"
@@ -68,44 +63,39 @@ class DualDomainSpider(scrapy.Spider):
         self.same_page_with_url_parameters = same_page_with_url_parameters
         self.target_lang = lang.lower() if lang else None
 
-        # Parse DB connection strings
+        # Parse DB connection strings.
         self.reference_db_config = self.parse_db_url(reference_db) if reference_db else None
         self.test_db_config = self.parse_db_url(test_db) if test_db else None
 
         # Store the selectors to remove (split by comma)
         self.remove_selectors = [sel.strip() for sel in remove_selectors.split(",")] if remove_selectors else []
 
-        # Phase 1 pages (reference) follow links; phase 2 pages (test) do not.
-        self.phase = 1
-        self.discovered_paths = set()
+        # Use a dict for deduplication: keys 1 and 2 for each phase.
+        self.seen_normalized = {1: set(), 2: set()}
 
         # Determine domains (credentials stripped).
         self.domain1 = self.get_domain(reference)
         self.domain2 = self.get_domain(test)
 
-        # For html outputs, use fixed folders: 'reference' and 'test'
-        os.makedirs(os.path.join("output", "html", "reference"), exist_ok=True)
-        os.makedirs(os.path.join("output", "html", "test"), exist_ok=True)
-
-        # For text outputs, use fixed folders: 'reference' and 'test'
-        os.makedirs(os.path.join("output", "text", "reference"), exist_ok=True)
-        os.makedirs(os.path.join("output", "text", "test"), exist_ok=True)
-
-        # For screenshots, use fixed directories: 'reference' and 'test'
-        os.makedirs(os.path.join("output", "screenshots", "reference"), exist_ok=True)
-        os.makedirs(os.path.join("output", "screenshots", "test"), exist_ok=True)
-
         self.auth1 = self.get_auth_info(reference)
         self.auth2 = self.get_auth_info(test)
 
-        # Sets for deduplication.
-        self.seen_normalized_1 = set()
-        self.seen_normalized_2 = set()
+        self.create_output_dirs()
 
         # For logging load metrics to CSV.
         self.log_file_path = os.path.join("output", "log.txt")
         self.log_handle = None  # Will be opened in spider_opened
         self.log_writer = None
+
+    def create_output_dirs(self):
+        """Create output directories for html, text, and screenshots for both reference and test."""
+        base = "output"
+        subfolders = ["html", "text", "screenshots"]
+        domains = ["reference", "test"]
+        for sub in subfolders:
+            for domain in domains:
+                os.makedirs(os.path.join(base, sub, domain), exist_ok=True)
+        os.makedirs(base, exist_ok=True)
 
     @classmethod
     def from_crawler(cls, crawler, *args, **kwargs):
@@ -115,11 +105,8 @@ class DualDomainSpider(scrapy.Spider):
         return spider
 
     def spider_opened(self, spider):
-        # Ensure output directory exists.
-        os.makedirs("output", exist_ok=True)
         self.log_handle = open(self.log_file_path, "w", newline="", encoding="utf-8")
         self.log_writer = csv.writer(self.log_handle)
-        # Write CSV header.
         self.log_writer.writerow([
             "timestamp", "url", "response_code", "ttfb (ms)",
             "dom_content_loaded (ms)", "load_event (ms)", "network_idle (ms)",
@@ -156,45 +143,33 @@ class DualDomainSpider(scrapy.Spider):
             "playwright_page_methods": [
                 PageMethod("route", "**/*", DualDomainSpider.block_unwanted_resources),
             ],
-            # To capture performance metrics, we ensure the page is included.
             "playwright_include_page": True,
         }
-        if self.save_screenshots:
-            meta["playwright_include_page"] = True
         if auth:
             meta["playwright_context_kwargs"] = {"http_credentials": auth}
         return meta
 
+    def get_domain_folder(self, domain):
+        """Return the folder name ('reference' or 'test') for the given domain."""
+        return "reference" if domain == self.domain1 else "test"
+
     def get_output_filepath(self, domain, url, subfolder, default_ext):
-        """
-        Build a file path for saving output files.
-        """
         relative = self.get_relative_path(url)
         sanitized = self.sanitize_path(relative)
-        folder = "reference" if domain == self.domain1 else "test"
+        folder = self.get_domain_folder(domain)
         return os.path.join("output", subfolder, folder, sanitized + default_ext)
 
     def sanitize_path(self, path):
         return re.sub(r'[<>:"/\\|?*]', "_", path)
 
     def get_relative_path(self, url):
-        """
-        Build a relative file path from the URL.
-        This version appends the query string (if any) to the URL's path.
-        For example:
-          /search?foo=bar becomes search_foo=bar
-        """
         parsed = urlparse(url)
-        path = parsed.path or "/"
-        # Remove any leading slash
-        path = path.lstrip("/")
-        # Always append the query string (if any) using an underscore as a separator.
+        path = parsed.path.lstrip("/") or "index"
         if parsed.query:
             path += "_" + parsed.query
         return path
 
     def get_request_relative_url(self, url):
-        """Return the exact relative URL (path plus query) for the request."""
         parsed = urlparse(url)
         relative = parsed.path
         if parsed.query:
@@ -202,11 +177,6 @@ class DualDomainSpider(scrapy.Spider):
         return relative
 
     def normalize_url(self, url):
-        """
-        Normalize the URL for deduplication.
-        If self.same_page_with_url_parameters is True, return path + query.
-        Otherwise, return just the path.
-        """
         parsed = urlparse(url)
         if self.same_page_with_url_parameters:
             relative = parsed.path
@@ -226,21 +196,19 @@ class DualDomainSpider(scrapy.Spider):
 
     def errback(self, failure):
         request = failure.request
-        # Try to get the status code from the exception.
         try:
             response_code = failure.value.response.status
         except AttributeError:
             response_code = "N/A"
 
         self.logger.error(f"Request failed: {request.url}. Response code: {response_code}")
-        # Log the failure with the response code.
         timestamp = datetime.datetime.now().isoformat()
-        self.log_writer.writerow([timestamp, request.url, response_code, "", "", "", ""])
-        self.log_handle.flush()
+        if self.log_writer:
+            self.log_writer.writerow([timestamp, request.url, response_code, "", "", "", "", ""])
+            self.log_handle.flush()
 
     async def parse_page(self, response):
         self.logger.info(f"Processing URL: {response.request.url}")
-        url_for_filename = response.request.url
         phase = response.meta.get("phase", 1)
         current_depth = response.meta.get("depth", 0)
         base_domain = self.domain1 if phase == 1 else self.domain2
@@ -256,73 +224,24 @@ class DualDomainSpider(scrapy.Spider):
 
         # Deduplicate based on normalized URL.
         normalized = self.normalize_url(response.request.url)
-        if phase == 1:
-            if normalized in self.seen_normalized_1:
-                self.logger.info(f"Skipping duplicate phase 1 URL: {normalized}")
-                return
-            self.seen_normalized_1.add(normalized)
-        else:
-            if normalized in self.seen_normalized_2:
-                self.logger.info(f"Skipping duplicate phase 2 URL: {normalized}")
-                return
-            self.seen_normalized_2.add(normalized)
+        if normalized in self.seen_normalized[phase]:
+            self.logger.info(f"Skipping duplicate phase {phase} URL: {normalized}")
+            return
+        self.seen_normalized[phase].add(normalized)
 
-        # Capture load-time metrics if a Playwright page is available.
-        metrics = {"ttfb": None, "dom_content_loaded": None, "load_event": None, "network_idle": None}
-        if "playwright_page" in response.meta:
-            page = response.meta["playwright_page"]
-            try:
-                # Use the performance.timing API to capture various load events.
-                performance_timing = await page.evaluate("() => JSON.stringify(window.performance.timing)")
-                performance_timing = json.loads(performance_timing)
-                navigation_start = performance_timing.get("navigationStart", 0)
-                response_start = performance_timing.get("responseStart", 0)
-                dom_content_loaded = performance_timing.get("domContentLoadedEventEnd", 0)
-                load_event = performance_timing.get("loadEventEnd", 0)
-                ttfb = response_start - navigation_start
-                dom_time = dom_content_loaded - navigation_start
-                load_time = load_event - navigation_start
-                # Wait for network idle and then get the current performance.now() value.
-                await page.wait_for_load_state("networkidle")
-                network_idle = await page.evaluate("() => performance.now()")
-                metrics = {
-                    "ttfb": ttfb,
-                    "dom_content_loaded": dom_time,
-                    "load_event": load_time,
-                    "network_idle": network_idle,
-                }
-            except Exception as e:
-                self.logger.error(f"Error capturing performance metrics for {response.request.url}: {e}")
-
-        # Log the metrics (CSV columns: timestamp, url, response code, ttfb, dom_content_loaded, load_event, network_idle).
+        metrics = await self.capture_performance_metrics(response)
         self.log_load_metrics(response.request.url, response.status, metrics, phase)
 
-        # Save HTML and Markdown.
         self.save_html(response, base_domain)
         self.save_markdown(response, base_domain)
 
-        # If screenshots are enabled, save a screenshot (this will close the page).
         if self.save_screenshots:
-            page = response.meta.get("playwright_page")
-            if page:
-                # Disable animations globally.
-                await page.add_style_tag(content="* { transition: none !important; animation: none !important; }")
-                # Wait for fonts to load.
-                await page.evaluate("() => document.fonts.ready")
-                # Remove unwanted elements if any selectors were provided.
-                for sel in self.remove_selectors:
-                    # Remove all elements matching the selector.
-                    await page.evaluate(f"""() => {{
-                        const elems = document.querySelectorAll('{sel}');
-                        elems.forEach(e => e.remove());
-                    }}""")
-            await self.save_screenshot(response, base_domain)
-
-        if "playwright_page" in response.meta and not self.save_screenshots:
+            await self.process_screenshot(response, base_domain)
+        elif "playwright_page" in response.meta:
             await response.meta["playwright_page"].close()
 
         if phase == 1:
-            # Schedule the same page from test using the exact relative URL.
+            # Schedule the same page from test.
             relative_request = self.get_request_relative_url(response.request.url)
             abs_test = urljoin(self.test, relative_request)
             yield scrapy.Request(
@@ -334,53 +253,69 @@ class DualDomainSpider(scrapy.Spider):
             )
             # Follow links if within crawl depth.
             if current_depth < self.crawl_depth:
-                for link in response.css("a::attr(href)").getall():
-                    if link.lower().startswith("javascript:") or link.lower().startswith("mailto:"):
-                        continue
-                    abs_url = response.urljoin(link)
-                    if not self.is_html_url(abs_url):
-                        continue
-                    parsed = urlparse(abs_url)
-                    if parsed.hostname != self.domain1:
-                        continue
-                    yield scrapy.Request(
-                        url=abs_url,
-                        callback=self.parse_page,
-                        meta=self.build_meta(phase=1, depth=current_depth + 1, auth=self.auth1),
-                        errback=self.errback,
-                    )
+                for req in self.follow_internal_links(response, current_depth + 1):
+                    yield req
+
+    async def capture_performance_metrics(self, response):
+        metrics = {"ttfb": None, "dom_content_loaded": None, "load_event": None, "network_idle": None}
+        if "playwright_page" in response.meta:
+            page = response.meta["playwright_page"]
+            try:
+                timing_json = await page.evaluate("() => JSON.stringify(window.performance.timing)")
+                timing = json.loads(timing_json)
+                nav_start = timing.get("navigationStart", 0)
+                resp_start = timing.get("responseStart", 0)
+                dcl = timing.get("domContentLoadedEventEnd", 0)
+                load_evt = timing.get("loadEventEnd", 0)
+                metrics["ttfb"] = resp_start - nav_start
+                metrics["dom_content_loaded"] = dcl - nav_start
+                metrics["load_event"] = load_evt - nav_start
+                await page.wait_for_load_state("networkidle")
+                metrics["network_idle"] = await page.evaluate("() => performance.now()")
+            except Exception as e:
+                self.logger.error(f"Error capturing performance metrics for {response.request.url}: {e}")
+        return metrics
+
+    def follow_internal_links(self, response, next_depth):
+        for link in response.css("a::attr(href)").getall():
+            if link.lower().startswith(("javascript:", "mailto:")):
+                continue
+            abs_url = response.urljoin(link)
+            if not self.is_html_url(abs_url):
+                continue
+            if urlparse(abs_url).hostname != self.domain1:
+                continue
+            yield scrapy.Request(
+                url=abs_url,
+                callback=self.parse_page,
+                meta=self.build_meta(phase=1, depth=next_depth, auth=self.auth1),
+                errback=self.errback,
+            )
 
     def is_html_url(self, url):
         non_html_ext = (
             ".jpg", ".jpeg", ".png", ".gif", ".svg", ".css",
             ".js", ".pdf", ".mp4", ".mp3", ".zip", ".rar"
         )
-        parsed = urlparse(url)
-        return not any(parsed.path.lower().endswith(ext) for ext in non_html_ext)
+        return not any(urlparse(url).path.lower().endswith(ext) for ext in non_html_ext)
 
     def save_html(self, response, base_domain):
         file_path = self.get_output_filepath(base_domain, response.request.url, "html", ".html")
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        with open(file_path, "wb") as f:
-            f.write(response.body)
+        self.write_file(file_path, response.body, binary=True)
 
     def clean_html(self, html):
         soup = BeautifulSoup(html, "html.parser")
         for tag in soup.find_all(['script', 'style', 'img']):
             tag.decompose()
-        # Recursively unwrap all <div> tags.
-        div_tags = soup.find_all('div')
-        while div_tags:
-            for tag in div_tags:
+        while soup.find_all('div'):
+            for tag in soup.find_all('div'):
                 tag.unwrap()
-            div_tags = soup.find_all('div')
         for tag in soup.find_all():
             tag.attrs = {}
         return str(soup)
 
     def save_markdown(self, response, base_domain):
         file_path = self.get_output_filepath(base_domain, response.request.url, "text", ".md")
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
         try:
             cleaned_html = self.clean_html(response.text)
             markdown_text = pypandoc.convert_text(cleaned_html, 'md', format='html')
@@ -388,63 +323,54 @@ class DualDomainSpider(scrapy.Spider):
         except Exception as e:
             self.logger.error(f"Pandoc conversion failed for {response.request.url}: {e}")
             markdown_text = "Conversion failed."
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(markdown_text)
+        self.write_file(file_path, markdown_text, binary=False)
 
-    async def save_screenshot(self, response, base_domain):
+    async def process_screenshot(self, response, base_domain):
         page = response.meta.get("playwright_page")
         if not page:
             self.logger.error("No playwright_page in meta for screenshot!")
             return
+        # Remove unwanted elements if selectors were provided.
+        for sel in self.remove_selectors:
+            await page.evaluate(f"""() => {{
+                document.querySelectorAll('{sel}').forEach(e => e.remove());
+            }}""")
         file_path = self.get_output_filepath(base_domain, response.request.url, "screenshots", ".png")
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
         await page.screenshot(path=file_path, full_page=True)
         self.logger.info(f"Saved screenshot: {file_path}")
-        # Explicitly close the page to free up the concurrency slot.
         await page.close()
 
+    def write_file(self, file_path, data, binary=False):
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        mode = "wb" if binary else "w"
+        with open(file_path, mode, encoding=None if binary else "utf-8") as f:
+            f.write(data)
+
     def log_load_metrics(self, url, response_code, metrics, phase):
-        """Logs page load times & optional watchdog logs for reference/test URLs."""
         if self.log_writer:
             timestamp = datetime.datetime.now().isoformat()
-            # Round each metric to the nearest whole number (milliseconds)
             ttfb = round(metrics.get("ttfb", 0))
-            dom_content_loaded = round(metrics.get("dom_content_loaded", 0))
-            load_event = round(metrics.get("load_event", 0))
+            dcl = round(metrics.get("dom_content_loaded", 0))
+            load_evt = round(metrics.get("load_event", 0))
             network_idle = round(metrics.get("network_idle", 0))
-
-            # Fetch watchdog errors if a DB config exists
             db_config = self.reference_db_config if phase == 1 else self.test_db_config
             watchdog_errors = self.get_watchdog_errors(url, db_config)
-
             self.log_writer.writerow([
-                timestamp, url, response_code, ttfb, dom_content_loaded, load_event, network_idle, watchdog_errors
+                timestamp, url, response_code, ttfb, dcl, load_evt, network_idle, watchdog_errors
             ])
             self.log_handle.flush()
 
-    def log_queue_size(self):
-        enqueued = self.crawler.stats.get_value("scheduler/enqueued")
-        dequeued = self.crawler.stats.get_value("scheduler/dequeued")
-        remaining = enqueued - dequeued if enqueued is not None and dequeued is not None else "unknown"
-        self.logger.info(f"Queue stats: enqueued={enqueued}, dequeued={dequeued}, remaining={remaining}")
-
     def parse_db_url(self, db_url):
-        """
-        Parse a MySQL connection string of the form:
-        mysql://user:pass@host:port/dbname
-        Returns a dictionary with connection details.
-        """
         parsed = urlparse(db_url)
         return {
             "host": parsed.hostname,
-            "port": parsed.port or 3306,  # Default MySQL port
+            "port": parsed.port or 3306,
             "user": parsed.username,
             "password": parsed.password,
-            "database": parsed.path.lstrip("/")  # Remove leading '/'
+            "database": parsed.path.lstrip("/")
         }
 
     def get_watchdog_errors(self, url, db_config):
-        """Query watchdog logs for a given URL, using only the relative path for matching."""
         if not db_config:
             return "No DB Config"
 
@@ -455,12 +381,9 @@ class DualDomainSpider(scrapy.Spider):
             ORDER BY timestamp DESC
             LIMIT 5;
         """
-
-        # Normalize URL to only keep the path (we still need the wildcard for matching full URLs)
         relative_url = self.normalize_watchdog_url(url)
-
         try:
-            with pymysql.connect(
+            connection = pymysql.connect(
                 host=db_config["host"],
                 port=int(db_config["port"]),
                 user=db_config["user"],
@@ -468,21 +391,20 @@ class DualDomainSpider(scrapy.Spider):
                 database=db_config["database"],
                 charset="utf8mb4",
                 cursorclass=pymysql.cursors.DictCursor
-            ) as connection:
+            )
+            with connection:
                 with connection.cursor() as cursor:
-                    cursor.execute(sql_query, ("%" + relative_url + "%",))  # Use wildcard for partial matches
+                    cursor.execute(sql_query, ("%" + relative_url + "%",))
                     logs = cursor.fetchall()
-
             return " | ".join([f"{log['timestamp']}: {log['message']}" for log in logs]) if logs else "No errors"
-
         except pymysql.MySQLError as e:
             self.logger.error(f"Failed to fetch watchdog logs: {e}")
             return "Error fetching logs"
 
     def normalize_watchdog_url(self, url):
-        """Extracts only the relative path from a URL to match watchdog logs correctly."""
         parsed = urlparse(url)
-        return parsed.path  # Keep only "/explore-the-map", removing domain and query parameters
+        return parsed.path  # Only the relative path is needed.
+
 
 if __name__ == "__main__":
     import argparse
@@ -495,20 +417,22 @@ if __name__ == "__main__":
     parser.add_argument("--same-page-with-url-parameters", action="store_true",
                         help="Treat pages with different query parameters as distinct.")
     parser.add_argument("--lang", default="", help="Only process pages with <html lang='X'> matching this language (e.g., 'en').")
-    parser.add_argument("--remove-selectors", default="", help="Comma-separated list of CSS selectors (e.g. '#block-ts-freedomhouse-newsletterpopup,.ad-banner') to remove from the page before taking a screenshot.")
-    parser.add_argument("--reference-db", default="", help="MySQL connection string for the reference site in the format: mysql://user:pass@host:port/dbname")
-    parser.add_argument("--test-db", default="", help="MySQL connection string for the test site in the format: mysql://user:pass@host:port/dbname")
+    parser.add_argument("--remove-selectors", default="", help="Comma-separated list of CSS selectors to remove before screenshot.")
+    parser.add_argument("--reference-db", default="", help="MySQL connection string for the reference site (mysql://user:pass@host:port/dbname)")
+    parser.add_argument("--test-db", default="", help="MySQL connection string for the test site (mysql://user:pass@host:port/dbname)")
     args = parser.parse_args()
 
     process = CrawlerProcess()
-    process.crawl(DualDomainSpider,
-                  crawl_depth=args.depth,
-                  reference=args.reference,
-                  test=args.test,
-                  save_screenshots=str(args.screenshots).lower(),
-                  same_page_with_url_parameters=args.same_page_with_url_parameters,
-                  lang=args.lang,
-                  remove_selectors=args.remove_selectors,
-                  reference_db=args.reference_db,
-                  test_db=args.test_db)
+    process.crawl(
+        DualDomainSpider,
+        crawl_depth=args.depth,
+        reference=args.reference,
+        test=args.test,
+        save_screenshots=str(args.screenshots).lower(),
+        same_page_with_url_parameters=args.same_page_with_url_parameters,
+        lang=args.lang,
+        remove_selectors=args.remove_selectors,
+        reference_db=args.reference_db,
+        test_db=args.test_db
+    )
     process.start()
