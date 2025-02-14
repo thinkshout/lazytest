@@ -1,5 +1,3 @@
-# Include way to do image diffs, maybe just reuse backstopJS functionality for that but use our output files.
-# Add logging for Drupal errors. How do we get those? Terminus? Database call?
 
 import os
 import re
@@ -36,6 +34,8 @@ class DualDomainSpider(scrapy.Spider):
             "args": [
                 "--disable-lcd-text",
                 "--disable-font-subpixel-positioning",
+                "--disable-gpu",
+                "--disable-gpu-rasterization",
             ]
         },
         "ROBOTSTXT_OBEY": False,
@@ -55,7 +55,7 @@ class DualDomainSpider(scrapy.Spider):
     }
 
     def __init__(self, crawl_depth, reference, test, save_screenshots="false",
-                 same_page_with_url_parameters=False, lang="", *args, **kwargs):
+                 same_page_with_url_parameters=False, lang="", remove_selectors="", *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.crawl_depth = int(crawl_depth)
         self.start_reference = reference
@@ -63,6 +63,9 @@ class DualDomainSpider(scrapy.Spider):
         self.save_screenshots = str(save_screenshots).lower() in ("true", "1", "yes")
         self.same_page_with_url_parameters = same_page_with_url_parameters
         self.target_lang = lang.lower() if lang else None
+
+        # Store the selectors to remove (split by comma)
+        self.remove_selectors = [sel.strip() for sel in remove_selectors.split(",")] if remove_selectors else []
 
         # Phase 1 pages (reference) follow links; phase 2 pages (test) do not.
         self.phase = 1
@@ -171,7 +174,9 @@ class DualDomainSpider(scrapy.Spider):
         """
         parsed = urlparse(url)
         path = parsed.path or "/"
+        # Remove any leading slash
         path = path.lstrip("/")
+        # Always append the query string (if any) using an underscore as a separator.
         if parsed.query:
             path += "_" + parsed.query
         return path
@@ -209,10 +214,21 @@ class DualDomainSpider(scrapy.Spider):
 
     def errback(self, failure):
         request = failure.request
-        self.logger.error(f"Request failed: {request.url}. Error: {failure}")
+        # Try to get the status code from the exception.
+        try:
+            response_code = failure.value.response.status
+        except AttributeError:
+            response_code = "N/A"
+
+        self.logger.error(f"Request failed: {request.url}. Response code: {response_code}")
+        # Log the failure with the response code.
+        timestamp = datetime.datetime.now().isoformat()
+        self.log_writer.writerow([timestamp, request.url, response_code, "", "", "", ""])
+        self.log_handle.flush()
 
     async def parse_page(self, response):
-        self.logger.info(f"Processing URL: {response.url}")
+        self.logger.info(f"Processing URL: {response.request.url}")
+        url_for_filename = response.request.url
         phase = response.meta.get("phase", 1)
         current_depth = response.meta.get("depth", 0)
         base_domain = self.domain1 if phase == 1 else self.domain2
@@ -223,11 +239,11 @@ class DualDomainSpider(scrapy.Spider):
             html_tag = soup.find("html")
             page_lang = html_tag.get("lang", "").lower() if html_tag else ""
             if page_lang != self.target_lang:
-                self.logger.info(f"Skipping page with lang '{page_lang}' (target: {self.target_lang}). URL: {response.url}")
+                self.logger.info(f"Skipping page with lang '{page_lang}' (target: {self.target_lang}). URL: {response.request.url}")
                 return
 
         # Deduplicate based on normalized URL.
-        normalized = self.normalize_url(response.url)
+        normalized = self.normalize_url(response.request.url)
         if phase == 1:
             if normalized in self.seen_normalized_1:
                 self.logger.info(f"Skipping duplicate phase 1 URL: {normalized}")
@@ -264,10 +280,10 @@ class DualDomainSpider(scrapy.Spider):
                     "network_idle": network_idle,
                 }
             except Exception as e:
-                self.logger.error(f"Error capturing performance metrics for {response.url}: {e}")
+                self.logger.error(f"Error capturing performance metrics for {response.request.url}: {e}")
 
         # Log the metrics (CSV columns: timestamp, url, response code, ttfb, dom_content_loaded, load_event, network_idle).
-        self.log_load_metrics(response.url, response.status, metrics)
+        self.log_load_metrics(response.request.url, response.status, metrics)
 
         # Save HTML and Markdown.
         self.save_html(response, base_domain)
@@ -275,16 +291,27 @@ class DualDomainSpider(scrapy.Spider):
 
         # If screenshots are enabled, save a screenshot (this will close the page).
         if self.save_screenshots:
+            page = response.meta.get("playwright_page")
+            if page:
+                # Disable animations globally.
+                await page.add_style_tag(content="* { transition: none !important; animation: none !important; }")
+                # Wait for fonts to load.
+                await page.evaluate("() => document.fonts.ready")
+                # Remove unwanted elements if any selectors were provided.
+                for sel in self.remove_selectors:
+                    # Remove all elements matching the selector.
+                    await page.evaluate(f"""() => {{
+                        const elems = document.querySelectorAll('{sel}');
+                        elems.forEach(e => e.remove());
+                    }}""")
             await self.save_screenshot(response, base_domain)
-
-        self.log_queue_size()
 
         if "playwright_page" in response.meta and not self.save_screenshots:
             await response.meta["playwright_page"].close()
 
         if phase == 1:
             # Schedule the same page from test using the exact relative URL.
-            relative_request = self.get_request_relative_url(response.url)
+            relative_request = self.get_request_relative_url(response.request.url)
             abs_test = urljoin(self.test, relative_request)
             yield scrapy.Request(
                 url=abs_test,
@@ -320,7 +347,7 @@ class DualDomainSpider(scrapy.Spider):
         return not any(parsed.path.lower().endswith(ext) for ext in non_html_ext)
 
     def save_html(self, response, base_domain):
-        file_path = self.get_output_filepath(base_domain, response.url, "html", ".html")
+        file_path = self.get_output_filepath(base_domain, response.request.url, "html", ".html")
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         with open(file_path, "wb") as f:
             f.write(response.body)
@@ -340,14 +367,14 @@ class DualDomainSpider(scrapy.Spider):
         return str(soup)
 
     def save_markdown(self, response, base_domain):
-        file_path = self.get_output_filepath(base_domain, response.url, "text", ".md")
+        file_path = self.get_output_filepath(base_domain, response.request.url, "text", ".md")
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         try:
             cleaned_html = self.clean_html(response.text)
             markdown_text = pypandoc.convert_text(cleaned_html, 'md', format='html')
             markdown_text = re.sub(r'</?div>', '', markdown_text)
         except Exception as e:
-            self.logger.error(f"Pandoc conversion failed for {response.url}: {e}")
+            self.logger.error(f"Pandoc conversion failed for {response.request.url}: {e}")
             markdown_text = "Conversion failed."
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(markdown_text)
@@ -357,7 +384,7 @@ class DualDomainSpider(scrapy.Spider):
         if not page:
             self.logger.error("No playwright_page in meta for screenshot!")
             return
-        file_path = self.get_output_filepath(base_domain, response.url, "screenshots", ".png")
+        file_path = self.get_output_filepath(base_domain, response.request.url, "screenshots", ".png")
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         await page.screenshot(path=file_path, full_page=True)
         self.logger.info(f"Saved screenshot: {file_path}")
@@ -401,6 +428,7 @@ if __name__ == "__main__":
     parser.add_argument("--same-page-with-url-parameters", action="store_true",
                         help="Treat pages with different query parameters as distinct.")
     parser.add_argument("--lang", default="", help="Only process pages with <html lang='X'> matching this language (e.g., 'en').")
+    parser.add_argument("--remove-selectors", default="", help="Comma-separated list of CSS selectors (e.g. '#block-ts-freedomhouse-newsletterpopup,.ad-banner') to remove from the page before taking a screenshot.")
     args = parser.parse_args()
 
     process = CrawlerProcess()
@@ -410,5 +438,6 @@ if __name__ == "__main__":
                   test=args.test,
                   save_screenshots=str(args.screenshots).lower(),
                   same_page_with_url_parameters=args.same_page_with_url_parameters,
-                  lang=args.lang)
+                  lang=args.lang,
+                  remove_selectors=args.remove_selectors)
     process.start()
