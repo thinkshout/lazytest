@@ -40,5 +40,4 @@ python ./test.py --test=https://develop-site.pantheonsite.io --reference=https:/
 `npx reg-cli output/screenshots/test output/screenshots/reference output/screenshots/diff -R output/screenshots/diff.html`
 
 ## Ideas
-* Add logging for Drupal errors. How do we get those? Terminus? Database call?
 * Allow a single url for when we just want to crawl to look for certain tags in the rendered html for example.
