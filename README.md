@@ -15,6 +15,7 @@ Allows for comparisons between test and reference.
 ## Run tests with
 `python ./test.py --test=https://develop-site.pantheonsite.io --reference=https://test-site.pantheonsite.io --depth=1 --lang=en --screenshots`
 python ./test.py --test=https://develop-site.pantheonsite.io --reference=https://test-site.pantheonsite.io --depth=1 --lang=en --screenshots --remove-selectors="#id,.class" --reference-db="mysql://[username]:[password]@[host]:[port]/[database name]"
+```
 --test
   Test domain
 --reference
@@ -32,6 +33,7 @@ python ./test.py --test=https://develop-site.pantheonsite.io --reference=https:/
 --reference-db="mysql://[username]:[password]@[host]:[port]/[database name]"
 --test-db="mysql://[username]:[password]@[host]:[port]/[database name]"
   Database connection details for Drupal sites to get watchdog logs for specific pages.
+ ```
 
 ## Run text diffs with
 `diff -r output/text/test output/text/reference`
