@@ -1,4 +1,4 @@
-This crawls a test and reference domain, saves html, text, and optional screenshots for both.
+This crawls a test and reference domain using a headless browser (with javascript), saves html, text, and optional screenshots for both.
 Allows for comparisons between test and reference.
 
 ## Output
