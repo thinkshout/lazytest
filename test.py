@@ -7,12 +7,15 @@ logging.getLogger("pypandoc").setLevel(logging.INFO)
 import json
 import csv
 import datetime
+import pymysql
+
 from urllib.parse import urlparse, urljoin, urlunparse
 
 import scrapy
 from scrapy.crawler import CrawlerProcess
 from scrapy import signals
 from scrapy.exceptions import DontCloseSpider
+from urllib.parse import urlparse
 
 import pypandoc  # For HTML-to-Markdown conversion
 from scrapy_playwright.page import PageMethod  # For intercepting requests
@@ -55,7 +58,8 @@ class DualDomainSpider(scrapy.Spider):
     }
 
     def __init__(self, crawl_depth, reference, test, save_screenshots="false",
-                 same_page_with_url_parameters=False, lang="", remove_selectors="", *args, **kwargs):
+                 same_page_with_url_parameters=False, lang="", remove_selectors="",
+                 reference_db="", test_db="", *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.crawl_depth = int(crawl_depth)
         self.start_reference = reference
@@ -63,6 +67,10 @@ class DualDomainSpider(scrapy.Spider):
         self.save_screenshots = str(save_screenshots).lower() in ("true", "1", "yes")
         self.same_page_with_url_parameters = same_page_with_url_parameters
         self.target_lang = lang.lower() if lang else None
+
+        # Parse DB connection strings
+        self.reference_db_config = self.parse_db_url(reference_db) if reference_db else None
+        self.test_db_config = self.parse_db_url(test_db) if test_db else None
 
         # Store the selectors to remove (split by comma)
         self.remove_selectors = [sel.strip() for sel in remove_selectors.split(",")] if remove_selectors else []
@@ -112,7 +120,11 @@ class DualDomainSpider(scrapy.Spider):
         self.log_handle = open(self.log_file_path, "w", newline="", encoding="utf-8")
         self.log_writer = csv.writer(self.log_handle)
         # Write CSV header.
-        self.log_writer.writerow(["timestamp", "url", "response_code", "ttfb (ms)", "dom_content_loaded (ms)", "load_event (ms)", "network_idle (ms)"])
+        self.log_writer.writerow([
+            "timestamp", "url", "response_code", "ttfb (ms)",
+            "dom_content_loaded (ms)", "load_event (ms)", "network_idle (ms)",
+            "watchdog_errors"
+        ])
 
     def spider_closed(self, spider):
         if self.log_handle:
@@ -283,7 +295,7 @@ class DualDomainSpider(scrapy.Spider):
                 self.logger.error(f"Error capturing performance metrics for {response.request.url}: {e}")
 
         # Log the metrics (CSV columns: timestamp, url, response code, ttfb, dom_content_loaded, load_event, network_idle).
-        self.log_load_metrics(response.request.url, response.status, metrics)
+        self.log_load_metrics(response.request.url, response.status, metrics, phase)
 
         # Save HTML and Markdown.
         self.save_html(response, base_domain)
@@ -391,7 +403,8 @@ class DualDomainSpider(scrapy.Spider):
         # Explicitly close the page to free up the concurrency slot.
         await page.close()
 
-    def log_load_metrics(self, url, response_code, metrics):
+    def log_load_metrics(self, url, response_code, metrics, phase):
+        """Logs page load times & optional watchdog logs for reference/test URLs."""
         if self.log_writer:
             timestamp = datetime.datetime.now().isoformat()
             # Round each metric to the nearest whole number (milliseconds)
@@ -400,14 +413,12 @@ class DualDomainSpider(scrapy.Spider):
             load_event = round(metrics.get("load_event", 0))
             network_idle = round(metrics.get("network_idle", 0))
 
+            # Fetch watchdog errors if a DB config exists
+            db_config = self.reference_db_config if phase == 1 else self.test_db_config
+            watchdog_errors = self.get_watchdog_errors(url, db_config)
+
             self.log_writer.writerow([
-                timestamp,
-                url,
-                response_code,
-                ttfb,
-                dom_content_loaded,
-                load_event,
-                network_idle,
+                timestamp, url, response_code, ttfb, dom_content_loaded, load_event, network_idle, watchdog_errors
             ])
             self.log_handle.flush()
 
@@ -416,6 +427,62 @@ class DualDomainSpider(scrapy.Spider):
         dequeued = self.crawler.stats.get_value("scheduler/dequeued")
         remaining = enqueued - dequeued if enqueued is not None and dequeued is not None else "unknown"
         self.logger.info(f"Queue stats: enqueued={enqueued}, dequeued={dequeued}, remaining={remaining}")
+
+    def parse_db_url(self, db_url):
+        """
+        Parse a MySQL connection string of the form:
+        mysql://user:pass@host:port/dbname
+        Returns a dictionary with connection details.
+        """
+        parsed = urlparse(db_url)
+        return {
+            "host": parsed.hostname,
+            "port": parsed.port or 3306,  # Default MySQL port
+            "user": parsed.username,
+            "password": parsed.password,
+            "database": parsed.path.lstrip("/")  # Remove leading '/'
+        }
+
+    def get_watchdog_errors(self, url, db_config):
+        """Query watchdog logs for a given URL, using only the relative path for matching."""
+        if not db_config:
+            return "No DB Config"
+
+        sql_query = """
+            SELECT timestamp, message, severity
+            FROM watchdog
+            WHERE location LIKE %s AND severity <= 4
+            ORDER BY timestamp DESC
+            LIMIT 5;
+        """
+
+        # Normalize URL to only keep the path (we still need the wildcard for matching full URLs)
+        relative_url = self.normalize_watchdog_url(url)
+
+        try:
+            with pymysql.connect(
+                host=db_config["host"],
+                port=int(db_config["port"]),
+                user=db_config["user"],
+                password=db_config["password"],
+                database=db_config["database"],
+                charset="utf8mb4",
+                cursorclass=pymysql.cursors.DictCursor
+            ) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(sql_query, ("%" + relative_url + "%",))  # Use wildcard for partial matches
+                    logs = cursor.fetchall()
+
+            return " | ".join([f"{log['timestamp']}: {log['message']}" for log in logs]) if logs else "No errors"
+
+        except pymysql.MySQLError as e:
+            self.logger.error(f"Failed to fetch watchdog logs: {e}")
+            return "Error fetching logs"
+
+    def normalize_watchdog_url(self, url):
+        """Extracts only the relative path from a URL to match watchdog logs correctly."""
+        parsed = urlparse(url)
+        return parsed.path  # Keep only "/explore-the-map", removing domain and query parameters
 
 if __name__ == "__main__":
     import argparse
@@ -429,6 +496,8 @@ if __name__ == "__main__":
                         help="Treat pages with different query parameters as distinct.")
     parser.add_argument("--lang", default="", help="Only process pages with <html lang='X'> matching this language (e.g., 'en').")
     parser.add_argument("--remove-selectors", default="", help="Comma-separated list of CSS selectors (e.g. '#block-ts-freedomhouse-newsletterpopup,.ad-banner') to remove from the page before taking a screenshot.")
+    parser.add_argument("--reference-db", default="", help="MySQL connection string for the reference site in the format: mysql://user:pass@host:port/dbname")
+    parser.add_argument("--test-db", default="", help="MySQL connection string for the test site in the format: mysql://user:pass@host:port/dbname")
     args = parser.parse_args()
 
     process = CrawlerProcess()
@@ -439,5 +508,7 @@ if __name__ == "__main__":
                   save_screenshots=str(args.screenshots).lower(),
                   same_page_with_url_parameters=args.same_page_with_url_parameters,
                   lang=args.lang,
-                  remove_selectors=args.remove_selectors)
+                  remove_selectors=args.remove_selectors,
+                  reference_db=args.reference_db,
+                  test_db=args.test_db)
     process.start()

@@ -2,13 +2,19 @@ This crawls a test and reference domain, saves html, text, and optional screensh
 Allows for comparisons between test and reference.
 
 ## Output
-* html is saved in output/html
-* markup based on the visible text from html is saved in output/text
-* screenshots (when enabled) are saved in output/screenshots
-* urls, load times and http response codes are saved in output\log.txt
+* html (output/html)
+* markup based on the visible text from html (output/text)
+* screenshots, optional (output/screenshots)
+* log file in output\log.txt contains
+  * timestamp
+  * urls
+  * http response code
+  * load times (ttfb, dom_content_loaded,load_event,network_idle)
+  * Drupal logs (watchdog)
 
 ## Run tests with
 `python ./test.py --test=https://develop-site.pantheonsite.io --reference=https://test-site.pantheonsite.io --depth=1 --lang=en --screenshots`
+python ./test.py --test=https://develop-site.pantheonsite.io --reference=https://test-site.pantheonsite.io --depth=1 --lang=en --screenshots --remove-selectors="#id,.class" --reference-db="mysql://[username]:[password]@[host]:[port]/[database name]"
 --test
   Test domain
 --reference
@@ -23,6 +29,9 @@ Allows for comparisons between test and reference.
   Only save/follow specific languages
 --remove-selectors="#id, .class"
   Remove elements before taking a screenshot (like a modal)
+--reference-db="mysql://[username]:[password]@[host]:[port]/[database name]"
+--test-db="mysql://[username]:[password]@[host]:[port]/[database name]"
+  Database connection details for Drupal sites to get watchdog logs for specific pages.
 
 ## Run text diffs with
 `diff -r output/text/test output/text/reference`
