@@ -3,7 +3,7 @@ Allows for comparisons between test and reference.
 
 ## Output
 * html (output/html)
-* markup based on the visible text from html (output/text)
+* markdown based on the visible text from html (output/text)
 * screenshots, optional (output/screenshots)
 * log file in output\log.txt contains
   * timestamp
@@ -15,10 +15,10 @@ Allows for comparisons between test and reference.
 
 ## Run tests with
 
-compare a test and reference site:
+Both a test and reference site:
 `python ./test.py --test=https://develop-site.pantheonsite.io --reference=https://test-site.pantheonsite.io --depth=1 --lang=en --screenshots --remove-selectors="#id,.class" --reference-db="mysql://[username]:[password]@[host]:[port]/[database name]"`
 
-compare a test site (no reference):
+Just a test site (no reference):
 `python ./test.py --test=https://develop-site.pantheonsite.io --depth=1 --lang=en --remove-selectors="#id,.class" --test-db="mysql://[username]:[password]@[host]:[port]/[database name]"`
 
 ```
