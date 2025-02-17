@@ -15,9 +15,19 @@ import pypandoc  # For HTML-to-Markdown conversion
 from scrapy_playwright.page import PageMethod
 from bs4 import BeautifulSoup  # For cleaning HTML and checking language
 
-# Define the async page init callback.
+@staticmethod
+async def block_unwanted_resources(route, request):
+    if request.resource_type not in {"document", "script"}:
+        await route.abort()
+    else:
+        await route.continue_()
+
 async def init_page(page, request):
-    # Build the absolute path to custom_script.js (assumed to be in the same folder).
+    # Apply the blocking of unwanted resources
+    spider = request.meta['spider']
+    if not spider.save_screenshots:
+        await page.route("**/*", block_unwanted_resources)
+    # If you have a custom script to add, include it here
     script_path = os.path.join(os.path.dirname(__file__), "custom_script.js")
     await page.add_init_script(path=script_path)
 
@@ -124,21 +134,14 @@ class DualDomainSpider(scrapy.Spider):
             return {"username": parsed.username, "password": parsed.password}
         return None
 
-    @staticmethod
-    async def block_unwanted_resources(route, request):
-        if request.resource_type not in {"document", "script"}:
-            await route.abort()
-        else:
-            await route.continue_()
-
     def build_meta(self, phase, depth, auth=None):
-        # Use the new page init callback approach.
         meta = {
             "playwright": True,
             "phase": phase,
             "depth": depth,
             "playwright_page_init_callback": init_page,
             "playwright_include_page": True,
+            "spider": self,
         }
         if auth:
             meta["playwright_context_kwargs"] = {"http_credentials": auth}
@@ -207,14 +210,22 @@ class DualDomainSpider(scrapy.Spider):
             yield scrapy.Request(
                 url=self.start_reference,
                 callback=self.parse_page,
-                meta=self.build_meta(phase=1, depth=0, auth=self.auth1),
+                meta={
+                    "playwright": True,
+                    "playwright_page_init_callback": init_page,
+                    **self.build_meta(phase=1, depth=0, auth=self.auth1)
+                },
                 errback=self.errback,
             )
         else:
             yield scrapy.Request(
                 url=self.test,
                 callback=self.parse_page,
-                meta=self.build_meta(phase=2, depth=0, auth=self.auth2),
+                meta={
+                    "playwright": True,
+                    "playwright_page_init_callback": init_page,
+                    **self.build_meta(phase=2, depth=0, auth=self.auth2)
+                },
                 errback=self.errback,
             )
 
@@ -283,6 +294,7 @@ class DualDomainSpider(scrapy.Spider):
                 errback=self.errback,
                 dont_filter=True,
             )
+
             # Follow internal links if within crawl depth.
             if current_depth < self.crawl_depth:
                 for req in self.follow_internal_links(response, current_depth + 1):
@@ -317,7 +329,15 @@ class DualDomainSpider(scrapy.Spider):
             yield scrapy.Request(
                 url=abs_url,
                 callback=self.parse_page,
-                meta=self.build_meta(phase=response.meta.get("phase", 1), depth=next_depth, auth=self.auth1 if response.meta.get("phase", 1) == 1 else self.auth2),
+                meta={
+                    "playwright": True,
+                    "playwright_page_init_callback": init_page,
+                    **self.build_meta(
+                        phase=response.meta.get("phase", 1),
+                        depth=next_depth,
+                        auth=self.auth1 if response.meta.get("phase", 1) == 1 else self.auth2
+                    )
+                },
                 errback=self.errback,
             )
 

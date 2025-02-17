@@ -31,7 +31,7 @@ compare a test site (no reference):
 --same_page_with_url_parameters
   Save and follow the same page with different url parameters like search?page=2
 --screenshots
-  Capture screenshots
+  Capture screenshots. This will be slower since it'll also download images etc.
 --target_lang=en
   Only save/follow specific languages
 --remove-selectors="#id, .class"
@@ -48,4 +48,4 @@ compare a test site (no reference):
 `npx reg-cli output/screenshots/test output/screenshots/reference output/screenshots/diff -R output/screenshots/diff.html`
 
 ## Todo/Ideas
-* See if block_unwanted_resources actually works.
+* 
