@@ -5,7 +5,8 @@ import json
 import csv
 import datetime
 import pymysql
-
+import asyncio
+import sys
 from urllib.parse import urlparse, urljoin
 import scrapy
 from scrapy.crawler import CrawlerProcess
@@ -13,9 +14,14 @@ from scrapy import signals
 from scrapy.exceptions import DontCloseSpider
 
 import pypandoc  # For HTML-to-Markdown conversion
-from scrapy_playwright.page import PageMethod  # For intercepting requests
+from scrapy_playwright.page import PageMethod
 from bs4 import BeautifulSoup  # For cleaning HTML and checking language
 
+# Define the async page init callback.
+async def init_page(page, request):
+    # Build the absolute path to custom_script.js (assumed to be in the same folder).
+    script_path = os.path.join(os.path.dirname(__file__), "custom_script.js")
+    await page.add_init_script(path=script_path)
 
 class DualDomainSpider(scrapy.Spider):
     name = "dual_domain_spider"
@@ -103,7 +109,7 @@ class DualDomainSpider(scrapy.Spider):
         self.log_writer.writerow([
             "timestamp", "url", "response_code", "ttfb (ms)",
             "dom_content_loaded (ms)", "load_event (ms)", "network_idle (ms)",
-            "watchdog_errors"
+            "watchdog_errors", "console_messages"
         ])
 
     def spider_closed(self, spider):
@@ -128,13 +134,12 @@ class DualDomainSpider(scrapy.Spider):
             await route.continue_()
 
     def build_meta(self, phase, depth, auth=None):
+        # Use the new page init callback approach.
         meta = {
             "playwright": True,
             "phase": phase,
             "depth": depth,
-            "playwright_page_methods": [
-                PageMethod("route", "**/*", DualDomainSpider.block_unwanted_resources),
-            ],
+            "playwright_page_init_callback": init_page,
             "playwright_include_page": True,
         }
         if auth:
@@ -216,7 +221,7 @@ class DualDomainSpider(scrapy.Spider):
         self.logger.error(f"Request failed: {request.url}. Response code: {response_code}")
         timestamp = datetime.datetime.now().isoformat()
         if self.log_writer:
-            self.log_writer.writerow([timestamp, request.url, response_code, "", "", "", "", ""])
+            self.log_writer.writerow([timestamp, request.url, response_code, "", "", "", "", "", ""])
             self.log_handle.flush()
 
     async def parse_page(self, response):
@@ -233,17 +238,34 @@ class DualDomainSpider(scrapy.Spider):
         if self.is_duplicate(response, phase):
             return
 
+        # Capture performance metrics.
         metrics = await self.capture_performance_metrics(response)
-        self.log_load_metrics(response.request.url, response.status, metrics, phase)
 
+        # Save HTML and Markdown outputs immediately.
         self.save_html(response, domain)
         self.save_markdown(response, domain)
 
+        # Retrieve messages stored via our injected init script.
+        console_messages = []
+        page = response.meta.get("playwright_page")
+        if page:
+            try:
+                console_messages = await page.evaluate("() => window.__consoleMessages || []")
+                if console_messages:
+                    self.logger.info(f"console messages: {console_messages}")
+            except Exception as e:
+                self.logger.error(f"Error retrieving console messages: {e}")
+
+        # Log the metrics along with the console messages.
+        self.log_load_metrics(response.request.url, response.status, metrics, phase, console_messages)
+
+        # Process screenshot if enabled; if not, close the page.
         if self.save_screenshots:
             await self.process_screenshot(response, domain)
-        elif "playwright_page" in response.meta:
-            await response.meta["playwright_page"].close()
+        elif page:
+            await page.close()
 
+        # If we're in phase 1, schedule the corresponding test page and follow internal links.
         if phase == 1:
             # Schedule corresponding test page.
             relative_request = self.get_request_relative_url(response.request.url)
@@ -352,7 +374,7 @@ class DualDomainSpider(scrapy.Spider):
         with open(file_path, mode, encoding=None if binary else "utf-8") as f:
             f.write(data)
 
-    def log_load_metrics(self, url, response_code, metrics, phase):
+    def log_load_metrics(self, url, response_code, metrics, phase, console_messages):
         if self.log_writer:
             timestamp = datetime.datetime.now().isoformat()
             ttfb = round(metrics.get("ttfb", 0))
@@ -361,8 +383,10 @@ class DualDomainSpider(scrapy.Spider):
             network_idle = round(metrics.get("network_idle", 0))
             db_config = self.reference_db_config if phase == 1 else self.test_db_config
             watchdog_errors = self.get_watchdog_errors(url, db_config)
+            console_messages_str = " | ".join([f"{msg['type']}: {msg['text']}" for msg in console_messages])
             self.log_writer.writerow([
-                timestamp, url, response_code, ttfb, dcl, load_evt, network_idle, watchdog_errors
+                timestamp, url, response_code, ttfb, dcl, load_evt, network_idle,
+                watchdog_errors, console_messages_str
             ])
             self.log_handle.flush()
 
@@ -410,7 +434,6 @@ class DualDomainSpider(scrapy.Spider):
     def normalize_watchdog_url(self, url):
         parsed = urlparse(url)
         return parsed.path
-
 
 if __name__ == "__main__":
     import argparse
