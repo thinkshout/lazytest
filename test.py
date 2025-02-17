@@ -5,6 +5,7 @@ import csv
 import datetime
 import pymysql
 import phpserialize
+import asyncio
 
 from urllib.parse import urlparse, urljoin
 import scrapy
@@ -14,6 +15,10 @@ from scrapy import signals
 import pypandoc  # For HTML-to-Markdown conversion
 from scrapy_playwright.page import PageMethod
 from bs4 import BeautifulSoup  # For cleaning HTML and checking language
+
+# Set the logging level for pypandoc to WARNING
+import logging
+logging.getLogger("pypandoc").setLevel(logging.WARNING)
 
 @staticmethod
 async def block_unwanted_resources(route, request):
@@ -54,10 +59,10 @@ class DualDomainSpider(scrapy.Spider):
         "CONCURRENT_REQUESTS_PER_DOMAIN": 8,
         "COOKIES_ENABLED": False,
         "DOWNLOAD_DELAY": 0,
-        "DOWNLOAD_TIMEOUT": 60,
-        "PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT": 60000,
-        "LOG_LEVEL": "INFO",
-        "AUTOTHROTTLE_ENABLED": True,
+        "DOWNLOAD_TIMEOUT": 30,
+        "PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT": 30000,
+        "LOG_LEVEL": "WARNING",
+        "AUTOTHROTTLE_ENABLED": False,
         "AUTOTHROTTLE_START_DELAY": 2,
         "AUTOTHROTTLE_MAX_DELAY": 60,
         "AUTOTHROTTLE_TARGET_CONCURRENCY": 1.0,
@@ -184,12 +189,12 @@ class DualDomainSpider(scrapy.Spider):
         return parsed.path
 
     def should_skip_page_due_to_language(self, response):
-        """Return True if the page language does not match the target language."""
+        """Return True if the page language is not empty and does not match the target language."""
         if self.target_lang:
             soup = BeautifulSoup(response.text, "html.parser")
             html_tag = soup.find("html")
             page_lang = html_tag.get("lang", "").lower() if html_tag else ""
-            if page_lang != self.target_lang:
+            if page_lang and page_lang != self.target_lang:
                 self.logger.info(
                     f"Skipping page with lang '{page_lang}' (target: {self.target_lang}). URL: {response.request.url}"
                 )
@@ -231,73 +236,84 @@ class DualDomainSpider(scrapy.Spider):
 
     def errback(self, failure):
         request = failure.request
-        try:
-            response_code = failure.value.response.status
-        except AttributeError:
-            response_code = "N/A"
+        response_code = getattr(failure.value.response, "status", "N/A")
+
         self.logger.error(f"Request failed: {request.url}. Response code: {response_code}")
+
+        # Get Playwright page from meta
+        page = request.meta.get("playwright_page")
+        if page:
+            asyncio.create_task(page.close())  # Close the page asynchronously
+
+        # Log the failure
         timestamp = datetime.datetime.now().isoformat()
         if self.log_writer:
             self.log_writer.writerow([timestamp, request.url, response_code, "", "", "", "", "", ""])
             self.log_handle.flush()
 
     async def parse_page(self, response):
-        self.logger.info(f"Processing URL: {response.request.url}")
+        print(f"Queue: {len(self.crawler.engine.slot.scheduler)}. Downloaded: {self.crawler.stats.get_value('response_received_count', 0)}. Processing URL: {response.request.url}")
         phase = response.meta.get("phase", 1)
         current_depth = response.meta.get("depth", 0)
         domain = self.domain1 if phase == 1 else self.domain2
 
-        # Skip if language doesn’t match.
-        if self.should_skip_page_due_to_language(response):
-            return
-
-        # Deduplicate URL.
-        if self.is_duplicate(response, phase):
-            return
-
-        # Capture performance metrics.
-        metrics = await self.capture_performance_metrics(response)
-
-        # Save HTML and Markdown outputs immediately.
-        self.save_html(response, domain)
-        self.save_markdown(response, domain)
-
-        # Retrieve messages stored via our injected init script.
-        console_messages = []
+        # Get the Playwright page reference
         page = response.meta.get("playwright_page")
-        if page:
-            try:
-                console_messages = await page.evaluate("() => window.__consoleMessages || []")
-                if console_messages:
-                    self.logger.info(f"console messages: {console_messages}")
-            except Exception as e:
-                self.logger.error(f"Error retrieving console messages: {e}")
 
-        # Log the metrics along with the console messages.
-        self.log_load_metrics(response.request.url, response.status, metrics, phase, console_messages)
+        try:
+            # Skip if language doesn’t match.
+            if self.should_skip_page_due_to_language(response):
+                return
 
-        # Process screenshot if enabled; if not, close the page.
-        if self.save_screenshots:
-            await self.process_screenshot(response, domain)
-        elif page:
-            await page.close()
+            # Deduplicate URL.
+            if self.is_duplicate(response, phase):
+                return
 
-        # Schedule corresponding test page if in phase 1 and reference is provided.
-        if phase == 1 and self.start_reference:
-            relative_request = self.get_request_relative_url(response.request.url)
-            abs_test = urljoin(self.test, relative_request)
-            yield scrapy.Request(
-                url=abs_test,
-                callback=self.parse_page,
-                meta=self.build_meta(phase=2, depth=current_depth, auth=self.auth2),
-                errback=self.errback,
-                dont_filter=True,
-            )
+            # Capture performance metrics.
+            metrics = await self.capture_performance_metrics(response)
 
-        # Follow internal links if within crawl depth, regardless of phase.
-        if current_depth < self.crawl_depth:
-            for req in self.follow_internal_links(response, current_depth + 1):
-                yield req
+            # Save HTML and Markdown outputs immediately.
+            self.save_html(response, domain)
+            self.save_markdown(response, domain)
+
+            # Retrieve messages stored via our injected init script.
+            console_messages = []
+            if page:
+                try:
+                    console_messages = await page.evaluate("() => window.__consoleMessages || []")
+                    if console_messages:
+                        self.logger.info(f"Console messages: {console_messages}")
+                except Exception as e:
+                    self.logger.error(f"Error retrieving console messages: {e}")
+
+            # Log the metrics along with the console messages.
+            self.log_load_metrics(response.request.url, response.status, metrics, phase, console_messages)
+
+            # Process screenshot if enabled.
+            if self.save_screenshots:
+                await self.process_screenshot(response, domain)
+
+            # Schedule corresponding test page if in phase 1 and reference is provided.
+            if phase == 1 and self.start_reference:
+                relative_request = self.get_request_relative_url(response.request.url)
+                abs_test = urljoin(self.test, relative_request)
+                yield scrapy.Request(
+                    url=abs_test,
+                    callback=self.parse_page,
+                    meta=self.build_meta(phase=2, depth=current_depth, auth=self.auth2),
+                    errback=self.errback,
+                    dont_filter=True,
+                )
+
+            # Follow internal links if within crawl depth.
+            if current_depth < self.crawl_depth:
+                for req in self.follow_internal_links(response, current_depth + 1):
+                    yield req
+
+        finally:
+            # Ensure the Playwright page is closed to avoid resource leaks
+            if page:
+                await page.close()
 
     async def capture_performance_metrics(self, response):
         metrics = {"ttfb": None, "dom_content_loaded": None, "load_event": None, "network_idle": None}
@@ -317,6 +333,11 @@ class DualDomainSpider(scrapy.Spider):
         return metrics
 
     def follow_internal_links(self, response, next_depth):
+        if not response.body.strip():
+            self.logger.error(f"Empty response body for URL: {response.request.url}")
+            return
+
+        links_followed = 0
         for link in response.css("a::attr(href)").getall():
             if link.lower().startswith(("javascript:", "mailto:", "tel:")):
                 continue
@@ -325,6 +346,7 @@ class DualDomainSpider(scrapy.Spider):
                 continue
             if urlparse(abs_url).hostname != (self.domain1 if response.meta.get("phase", 1) == 1 else self.domain2):
                 continue
+            links_followed += 1
             yield scrapy.Request(
                 url=abs_url,
                 callback=self.parse_page,
@@ -405,7 +427,7 @@ class DualDomainSpider(scrapy.Spider):
             ttfb = round(metrics.get("ttfb", 0))
             dcl = round(metrics.get("dom_content_loaded", 0))
             load_evt = round(metrics.get("load_event", 0))
-            network_idle = round(metrics.get("network_idle", 0))
+            network_idle = round(metrics.get("network_idle", 0)) if metrics.get("network_idle") is not None else 0
             db_config = self.reference_db_config if phase == 1 else self.test_db_config
             watchdog_errors = self.get_watchdog_errors(url, db_config)
 
@@ -505,7 +527,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Dual domain crawler with comparison functionality.")
     parser.add_argument("--reference", help="Starting URL for domain 1.")
     parser.add_argument("--test", required=True, help="Starting URL for domain 2.")
-    parser.add_argument("--depth", type=int, default=2, help="Crawl depth.")
+    parser.add_argument("--depth", type=int, default=4, help="Crawl depth.")
     parser.add_argument("--screenshots", action="store_true", help="Enable saving screenshots.")
     parser.add_argument("--same-page-with-url-parameters", action="store_true",
                         help="Treat pages with different query parameters as distinct.")
@@ -521,7 +543,7 @@ if __name__ == "__main__":
         crawl_depth=args.depth,
         reference=args.reference,
         test=args.test,
-        save_screenshots=str(args.screenshots).lower(),
+        save_screenshots=args.screenshots,
         same_page_with_url_parameters=args.same_page_with_url_parameters,
         lang=args.lang,
         remove_selectors=args.remove_selectors,
