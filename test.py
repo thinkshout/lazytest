@@ -1,20 +1,15 @@
 import os
 import re
-import logging
 import json
 import csv
 import datetime
 import pymysql
-import asyncio
-import sys
 import phpserialize
-import re
 
 from urllib.parse import urlparse, urljoin
 import scrapy
 from scrapy.crawler import CrawlerProcess
 from scrapy import signals
-from scrapy.exceptions import DontCloseSpider
 
 import pypandoc  # For HTML-to-Markdown conversion
 from scrapy_playwright.page import PageMethod
@@ -439,11 +434,6 @@ class DualDomainSpider(scrapy.Spider):
                 message = log['message']
                 variables = log['variables']
                 log_type = log['type']
-
-                self.logger.error("testing123:")
-                self.logger.error(message)
-                self.logger.error(variables)
-
                 if variables:
                     decoded_vars = phpserialize.loads(variables, decode_strings=True, object_hook=self.ignore_php_objects)
                     message = self.replace_placeholders(message, decoded_vars)
