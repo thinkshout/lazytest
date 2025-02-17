@@ -11,6 +11,7 @@ Allows for comparisons between test and reference.
   * http response code
   * load times (ttfb, dom_content_loaded,load_event,network_idle)
   * Drupal logs (watchdog)
+  * Browser console logs (javascript errors)
 
 ## Run tests with
 `python ./test.py --test=https://develop-site.pantheonsite.io --reference=https://test-site.pantheonsite.io --depth=1 --lang=en --screenshots --remove-selectors="#id,.class" --reference-db="mysql://[username]:[password]@[host]:[port]/[database name]"`
@@ -41,6 +42,4 @@ Allows for comparisons between test and reference.
 `npx reg-cli output/screenshots/test output/screenshots/reference output/screenshots/diff -R output/screenshots/diff.html`
 
 ## Todo/Ideas
-* Add javascript console errors.
-* Add Drupal watchdog variables to message
 * Allow a single url for when we just want to crawl to look for certain tags in the rendered html for example.
