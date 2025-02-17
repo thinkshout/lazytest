@@ -1,5 +1,0 @@
-name: Lazy Test
-description: A module to test loading of various pages and check for warnings and errors.
-package: Custom
-type: module
-core_version_requirement: ^9 | ^10
