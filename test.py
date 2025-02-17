@@ -7,6 +7,9 @@ import datetime
 import pymysql
 import asyncio
 import sys
+import phpserialize
+import re
+
 from urllib.parse import urlparse, urljoin
 import scrapy
 from scrapy.crawler import CrawlerProcess
@@ -383,7 +386,11 @@ class DualDomainSpider(scrapy.Spider):
             network_idle = round(metrics.get("network_idle", 0))
             db_config = self.reference_db_config if phase == 1 else self.test_db_config
             watchdog_errors = self.get_watchdog_errors(url, db_config)
+
+            # Sanitize messages by replacing newlines and excessive whitespace
             console_messages_str = " | ".join([f"{msg['type']}: {msg['text']}" for msg in console_messages])
+            watchdog_errors = " ".join(watchdog_errors.splitlines())  # Flatten multi-line logs
+
             self.log_writer.writerow([
                 timestamp, url, response_code, ttfb, dcl, load_evt, network_idle,
                 watchdog_errors, console_messages_str
@@ -405,7 +412,7 @@ class DualDomainSpider(scrapy.Spider):
             return "No DB Config"
 
         sql_query = """
-            SELECT timestamp, message, severity
+            SELECT timestamp, type, message, variables, severity
             FROM watchdog
             WHERE location LIKE %s AND severity <= 4
             ORDER BY timestamp DESC
@@ -426,10 +433,50 @@ class DualDomainSpider(scrapy.Spider):
                 with connection.cursor() as cursor:
                     cursor.execute(sql_query, ("%" + relative_url + "%",))
                     logs = cursor.fetchall()
-            return " | ".join([f"{log['timestamp']}: {log['message']}" for log in logs]) if logs else "No errors"
+
+            combined_logs = []
+            for log in logs:
+                message = log['message']
+                variables = log['variables']
+                log_type = log['type']
+
+                self.logger.error("testing123:")
+                self.logger.error(message)
+                self.logger.error(variables)
+
+                if variables:
+                    decoded_vars = phpserialize.loads(variables, decode_strings=True, object_hook=self.ignore_php_objects)
+                    message = self.replace_placeholders(message, decoded_vars)
+
+                combined_logs.append(f"{log['timestamp']} [{log_type}]: {message}")
+
+            return " | ".join(combined_logs) if combined_logs else "No errors"
         except pymysql.MySQLError as e:
             self.logger.error(f"Failed to fetch watchdog logs: {e}")
             return "Error fetching logs"
+
+    def ignore_php_objects(self, class_name, obj_dict):
+        """Ignore PHP objects when deserializing."""
+        return "[Ignored PHP Object]"
+
+    def safe_deserialize(self, variables):
+        """Safely deserialize PHP serialized data while ignoring objects."""
+        try:
+            # Ensure variables are bytes before deserializing
+            if isinstance(variables, str):
+                variables = variables.encode("utf-8")
+
+            # Deserialize with object_hook to ignore PHP objects
+            decoded_vars = phpserialize.loads(variables, decode_strings=True, object_hook=ignore_php_objects)
+
+            # Convert all values to strings
+            return {key: str(value) for key, value in decoded_vars.items()}
+        except (UnicodeEncodeError, ValueError, Exception) as e:
+            self.logger.error(f"Error deserializing variables: {e}")
+            return {}
+
+    def replace_placeholders(self, message, variables):
+        return re.sub(r'(@\w+|%\w+)', lambda match: str(variables.get(match.group(0), match.group(0))), message)
 
     def normalize_watchdog_url(self, url):
         parsed = urlparse(url)
