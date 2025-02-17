@@ -59,7 +59,7 @@ class DualDomainSpider(scrapy.Spider):
                  reference_db="", test_db="", *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.crawl_depth = int(crawl_depth)
-        self.start_reference = reference
+        self.start_reference = reference if reference else None
         self.test = test
         self.save_screenshots = str(save_screenshots).lower() in ("true", "1", "yes")
         self.same_page_with_url_parameters = same_page_with_url_parameters
@@ -73,10 +73,10 @@ class DualDomainSpider(scrapy.Spider):
         # Deduplication sets for each phase.
         self.seen_normalized = {1: set(), 2: set()}
 
-        self.domain1 = self.get_domain(reference)
+        self.domain1 = self.get_domain(reference) if reference else None
         self.domain2 = self.get_domain(test)
 
-        self.auth1 = self.get_auth_info(reference)
+        self.auth1 = self.get_auth_info(reference) if reference else None
         self.auth2 = self.get_auth_info(test)
 
         self.create_output_dirs()
@@ -203,12 +203,20 @@ class DualDomainSpider(scrapy.Spider):
         return False
 
     def start_requests(self):
-        yield scrapy.Request(
-            url=self.start_reference,
-            callback=self.parse_page,
-            meta=self.build_meta(phase=1, depth=0, auth=self.auth1),
-            errback=self.errback,
-        )
+        if self.start_reference:
+            yield scrapy.Request(
+                url=self.start_reference,
+                callback=self.parse_page,
+                meta=self.build_meta(phase=1, depth=0, auth=self.auth1),
+                errback=self.errback,
+            )
+        else:
+            yield scrapy.Request(
+                url=self.test,
+                callback=self.parse_page,
+                meta=self.build_meta(phase=2, depth=0, auth=self.auth2),
+                errback=self.errback,
+            )
 
     def errback(self, failure):
         request = failure.request
@@ -264,7 +272,7 @@ class DualDomainSpider(scrapy.Spider):
             await page.close()
 
         # If we're in phase 1, schedule the corresponding test page and follow internal links.
-        if phase == 1:
+        if phase == 1 and self.start_reference:
             # Schedule corresponding test page.
             relative_request = self.get_request_relative_url(response.request.url)
             abs_test = urljoin(self.test, relative_request)
@@ -299,17 +307,17 @@ class DualDomainSpider(scrapy.Spider):
 
     def follow_internal_links(self, response, next_depth):
         for link in response.css("a::attr(href)").getall():
-            if link.lower().startswith(("javascript:", "mailto:")):
+            if link.lower().startswith(("javascript:", "mailto:", "tel:")):
                 continue
             abs_url = response.urljoin(link)
             if not self.is_html_url(abs_url):
                 continue
-            if urlparse(abs_url).hostname != self.domain1:
+            if urlparse(abs_url).hostname != (self.domain1 if response.meta.get("phase", 1) == 1 else self.domain2):
                 continue
             yield scrapy.Request(
                 url=abs_url,
                 callback=self.parse_page,
-                meta=self.build_meta(phase=1, depth=next_depth, auth=self.auth1),
+                meta=self.build_meta(phase=response.meta.get("phase", 1), depth=next_depth, auth=self.auth1 if response.meta.get("phase", 1) == 1 else self.auth2),
                 errback=self.errback,
             )
 
@@ -388,7 +396,7 @@ class DualDomainSpider(scrapy.Spider):
 
             self.log_writer.writerow([
                 timestamp, url, response_code, ttfb, dcl, load_evt, network_idle,
-                watchdog_errors, console_messages_str
+                console_messages_str, watchdog_errors
             ])
             self.log_handle.flush()
 
@@ -476,7 +484,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Dual domain crawler with comparison functionality.")
-    parser.add_argument("--reference", required=True, help="Starting URL for domain 1.")
+    parser.add_argument("--reference", help="Starting URL for domain 1.")
     parser.add_argument("--test", required=True, help="Starting URL for domain 2.")
     parser.add_argument("--depth", type=int, default=2, help="Crawl depth.")
     parser.add_argument("--screenshots", action="store_true", help="Enable saving screenshots.")
