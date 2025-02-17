@@ -282,9 +282,8 @@ class DualDomainSpider(scrapy.Spider):
         elif page:
             await page.close()
 
-        # If we're in phase 1, schedule the corresponding test page and follow internal links.
+        # Schedule corresponding test page if in phase 1 and reference is provided.
         if phase == 1 and self.start_reference:
-            # Schedule corresponding test page.
             relative_request = self.get_request_relative_url(response.request.url)
             abs_test = urljoin(self.test, relative_request)
             yield scrapy.Request(
@@ -295,10 +294,10 @@ class DualDomainSpider(scrapy.Spider):
                 dont_filter=True,
             )
 
-            # Follow internal links if within crawl depth.
-            if current_depth < self.crawl_depth:
-                for req in self.follow_internal_links(response, current_depth + 1):
-                    yield req
+        # Follow internal links if within crawl depth, regardless of phase.
+        if current_depth < self.crawl_depth:
+            for req in self.follow_internal_links(response, current_depth + 1):
+                yield req
 
     async def capture_performance_metrics(self, response):
         metrics = {"ttfb": None, "dom_content_loaded": None, "load_event": None, "network_idle": None}
