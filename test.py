@@ -123,7 +123,7 @@ class DualDomainSpider(scrapy.Spider):
             "timestamp", "request url", "final url", "response_code", "ttfb (ms)",
             "dom_content_loaded (ms)", "load_event (ms)", "network_idle (ms)",
             "age", "cache-control", "date", "expires",
-            "last-modified", "x-cache", "x-cache-hits", "x-drupal-dynamic-cache",
+            "last-modified", "x-cache", "x-cache-hits", "x-drupal-dynamic-cache", "vary", "set-cookie"
             "console_messages", "watchdog_errors"
         ])
 
@@ -238,7 +238,12 @@ class DualDomainSpider(scrapy.Spider):
 
     def errback(self, failure):
         request = failure.request
-        response_code = getattr(failure.value.response, "status", "N/A")
+        response_code = "N/A"
+
+        if hasattr(failure.value, 'response'):
+            response_code = getattr(failure.value.response, "status", "N/A")
+        elif isinstance(failure.value, TimeoutError):
+            self.logger.error(f"Request timed out: {request.url}")
 
         self.logger.error(f"Request failed: {request.url}. Response code: {response_code}")
 
@@ -437,7 +442,7 @@ class DualDomainSpider(scrapy.Spider):
             watchdog_errors = self.get_watchdog_errors(urls_to_check, db_config)
 
             # Only include the final URL if it differs from the request URL.
-            final_url_to_print = url_final if url_final != url_request else ""
+            final_url_to_print = url_final if url_final.rstrip("/") != url_request.rstrip("/") else ""
 
             # Sanitize messages by replacing newlines and excessive whitespace
             console_messages_str = " | ".join([f"{msg['type']}: {msg['text']}" for msg in console_messages])
@@ -453,11 +458,13 @@ class DualDomainSpider(scrapy.Spider):
             x_cache = headers.get("X-Cache", b"").decode("utf-8")
             x_cache_hits = headers.get("X-Cache-Hits", b"").decode("utf-8")
             x_drupal_dynamic_cache = headers.get("X-Drupal-Dynamic-Cache", b"").decode("utf-8")
+            vary = headers.get("Vary", b"").decode("utf-8")
+            set_cookie = headers.get("Set-Cookie", b"").decode("utf-8")
 
             self.log_writer.writerow([
                 timestamp, url_request, final_url_to_print, response_code, ttfb, dcl, load_evt, network_idle,
                 age, cache_control, date, expires,
-                last_modified, x_cache, x_cache_hits, x_drupal_dynamic_cache,
+                last_modified, x_cache, x_cache_hits, x_drupal_dynamic_cache, vary, set_cookie,
                 console_messages_str, watchdog_errors
             ])
             self.log_handle.flush()
