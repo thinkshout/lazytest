@@ -7,9 +7,11 @@ Allows for comparisons between test and reference.
 * screenshots, optional (output/screenshots)
 * log file in output\log.txt contains
   * timestamp
-  * urls
+  * request url
+  * final url (if redirected)
   * http response code
   * load times (ttfb, dom_content_loaded,load_event,network_idle)
+  * cache information (age, cache-control, date, expires, last-modified, x-cache, x-cache-hits, x-drupal-dynamic-cache)
   * Browser console logs (javascript errors)
   * Drupal logs (watchdog)
 
@@ -48,4 +50,4 @@ Just a test site (no reference):
 `npx reg-cli output/screenshots/test output/screenshots/reference output/screenshots/diff -R output/screenshots/diff.html`
 
 ## Todo/Ideas
-* 
+* Add cache hits/misses to log

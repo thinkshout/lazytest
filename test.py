@@ -96,7 +96,7 @@ class DualDomainSpider(scrapy.Spider):
 
         self.create_output_dirs()
 
-        self.log_file_path = os.path.join("output", "log.txt")
+        self.log_file_path = os.path.join("output", "log.csv")
         self.log_handle = None
         self.log_writer = None
 
@@ -120,9 +120,11 @@ class DualDomainSpider(scrapy.Spider):
         self.log_handle = open(self.log_file_path, "w", newline="", encoding="utf-8")
         self.log_writer = csv.writer(self.log_handle)
         self.log_writer.writerow([
-            "timestamp", "url", "response_code", "ttfb (ms)",
+            "timestamp", "request url", "final url", "response_code", "ttfb (ms)",
             "dom_content_loaded (ms)", "load_event (ms)", "network_idle (ms)",
-            "watchdog_errors", "console_messages"
+            "age", "cache-control", "date", "expires",
+            "last-modified", "x-cache", "x-cache-hits", "x-drupal-dynamic-cache",
+            "console_messages", "watchdog_errors"
         ])
 
     def spider_closed(self, spider):
@@ -287,7 +289,7 @@ class DualDomainSpider(scrapy.Spider):
                     self.logger.error(f"Error retrieving console messages: {e}")
 
             # Log the metrics along with the console messages.
-            self.log_load_metrics(response.request.url, response.status, metrics, phase, console_messages)
+            self.log_load_metrics(response.request.url, response.url, response.status, metrics, phase, console_messages, response)
 
             # Process screenshot if enabled.
             if self.save_screenshots:
@@ -421,7 +423,7 @@ class DualDomainSpider(scrapy.Spider):
         with open(file_path, mode, encoding=None if binary else "utf-8") as f:
             f.write(data)
 
-    def log_load_metrics(self, url, response_code, metrics, phase, console_messages):
+    def log_load_metrics(self, url_request, url_final, response_code, metrics, phase, console_messages, response):
         if self.log_writer:
             timestamp = datetime.datetime.now().isoformat()
             ttfb = round(metrics.get("ttfb", 0))
@@ -429,14 +431,33 @@ class DualDomainSpider(scrapy.Spider):
             load_evt = round(metrics.get("load_event", 0))
             network_idle = round(metrics.get("network_idle", 0)) if metrics.get("network_idle") is not None else 0
             db_config = self.reference_db_config if phase == 1 else self.test_db_config
-            watchdog_errors = self.get_watchdog_errors(url, db_config)
+
+            # Create a list with the request URL, any redirect URLs, and the final URL.
+            urls_to_check = [url_request] + response.meta.get('redirect_urls', []) + [url_final]
+            watchdog_errors = self.get_watchdog_errors(urls_to_check, db_config)
+
+            # Only include the final URL if it differs from the request URL.
+            final_url_to_print = url_final if url_final != url_request else ""
 
             # Sanitize messages by replacing newlines and excessive whitespace
             console_messages_str = " | ".join([f"{msg['type']}: {msg['text']}" for msg in console_messages])
             watchdog_errors = " ".join(watchdog_errors.splitlines())  # Flatten multi-line logs
 
+            # Extract caching headers safely
+            headers = response.headers
+            age = headers.get("Age", b"").decode("utf-8")
+            cache_control = headers.get("Cache-Control", b"").decode("utf-8")
+            date = headers.get("Date", b"").decode("utf-8")
+            expires = headers.get("Expires", b"").decode("utf-8")
+            last_modified = headers.get("Last-Modified", b"").decode("utf-8")
+            x_cache = headers.get("X-Cache", b"").decode("utf-8")
+            x_cache_hits = headers.get("X-Cache-Hits", b"").decode("utf-8")
+            x_drupal_dynamic_cache = headers.get("X-Drupal-Dynamic-Cache", b"").decode("utf-8")
+
             self.log_writer.writerow([
-                timestamp, url, response_code, ttfb, dcl, load_evt, network_idle,
+                timestamp, url_request, final_url_to_print, response_code, ttfb, dcl, load_evt, network_idle,
+                age, cache_control, date, expires,
+                last_modified, x_cache, x_cache_hits, x_drupal_dynamic_cache,
                 console_messages_str, watchdog_errors
             ])
             self.log_handle.flush()
@@ -451,18 +472,32 @@ class DualDomainSpider(scrapy.Spider):
             "database": parsed.path.lstrip("/")
         }
 
-    def get_watchdog_errors(self, url, db_config):
+    def get_watchdog_errors(self, urls, db_config):
         if not db_config:
             return "No DB Config"
 
-        sql_query = """
+        # Ensure urls is a list
+        if not isinstance(urls, list):
+            urls = [urls]
+
+        # Build a dynamic WHERE clause for each URL.
+        conditions = []
+        params = []
+        for u in urls:
+            relative_url = self.normalize_watchdog_url(u)
+            conditions.append("location LIKE %s")
+            params.append("%" + relative_url + "%")
+            conditions.append("location LIKE %s")
+            params.append("%" + u + "%")
+        condition_str = " OR ".join(conditions)
+
+        sql_query = f"""
             SELECT timestamp, type, message, variables, severity
             FROM watchdog
-            WHERE location LIKE %s AND severity <= 4
+            WHERE ({condition_str}) AND severity <= 4
             ORDER BY timestamp DESC
             LIMIT 5;
         """
-        relative_url = self.normalize_watchdog_url(url)
         try:
             connection = pymysql.connect(
                 host=db_config["host"],
@@ -475,7 +510,7 @@ class DualDomainSpider(scrapy.Spider):
             )
             with connection:
                 with connection.cursor() as cursor:
-                    cursor.execute(sql_query, ("%" + relative_url + "%",))
+                    cursor.execute(sql_query, params)
                     logs = cursor.fetchall()
 
             combined_logs = []
@@ -486,7 +521,6 @@ class DualDomainSpider(scrapy.Spider):
                 if variables:
                     decoded_vars = phpserialize.loads(variables, decode_strings=True, object_hook=self.ignore_php_objects)
                     message = self.replace_placeholders(message, decoded_vars)
-
                 combined_logs.append(f"{log['timestamp']} [{log_type}]: {message}")
 
             return " | ".join(combined_logs) if combined_logs else "No errors"
