@@ -123,7 +123,7 @@ class DualDomainSpider(scrapy.Spider):
             "timestamp", "request url", "final url", "response_code", "ttfb (ms)",
             "dom_content_loaded (ms)", "load_event (ms)", "network_idle (ms)",
             "age", "cache-control", "date", "expires",
-            "last-modified", "x-cache", "x-cache-hits", "x-drupal-dynamic-cache", "vary", "set-cookie"
+            "last-modified", "x-cache", "x-cache-hits", "x-drupal-dynamic-cache", "vary", "set-cookie",
             "console_messages", "watchdog_errors"
         ])
 
