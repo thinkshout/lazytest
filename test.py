@@ -123,7 +123,7 @@ class DualDomainSpider(scrapy.Spider):
             "timestamp", "request url", "final url", "response_code", "ttfb (ms)",
             "dom_content_loaded (ms)", "load_event (ms)", "network_idle (ms)",
             "age", "cache-control", "date", "expires",
-            "last-modified", "x-cache", "x-cache-hits", "x-drupal-dynamic-cache", "vary", "set-cookie",
+            "last-modified", "x-cache", "x-cache-hits", "x-drupal-dynamic-cache", "vary", "set-cookie", "x-drupal-cache-contexts", "x-drupal-cache-max-age", "x-drupal-cache-tags",
             "console_messages", "watchdog_errors"
         ])
 
@@ -149,6 +149,7 @@ class DualDomainSpider(scrapy.Spider):
             "playwright_page_init_callback": init_page,
             "playwright_include_page": True,
             "spider": self,
+            "playwright_context": "new"
         }
         if auth:
             meta["playwright_context_kwargs"] = {"http_credentials": auth}
@@ -268,6 +269,12 @@ class DualDomainSpider(scrapy.Spider):
         page = response.meta.get("playwright_page")
 
         try:
+            # Check if the response content type is text-based
+            content_type = response.headers.get('Content-Type', b'').decode('utf-8')
+            if not content_type.startswith('text'):
+                self.logger.error(f"Skipping non-text response: {response.request.url} (Content-Type: {content_type})")
+                return
+
             # Skip if language doesn’t match.
             if self.should_skip_page_due_to_language(response):
                 return
@@ -460,11 +467,14 @@ class DualDomainSpider(scrapy.Spider):
             x_drupal_dynamic_cache = headers.get("X-Drupal-Dynamic-Cache", b"").decode("utf-8")
             vary = headers.get("Vary", b"").decode("utf-8")
             set_cookie = headers.get("Set-Cookie", b"").decode("utf-8")
+            x_drupal_cache_contexts = headers.get("x-drupal-cache-contexts", b"").decode("utf-8")
+            x_drupal_cache_max_age = headers.get("x-drupal-cache-max-age", b"").decode("utf-8")
+            x_drupal_cache_tags = headers.get("x-drupal-cache-tags", b"").decode("utf-8")
 
             self.log_writer.writerow([
                 timestamp, url_request, final_url_to_print, response_code, ttfb, dcl, load_evt, network_idle,
                 age, cache_control, date, expires,
-                last_modified, x_cache, x_cache_hits, x_drupal_dynamic_cache, vary, set_cookie,
+                last_modified, x_cache, x_cache_hits, x_drupal_dynamic_cache, vary, set_cookie, x_drupal_cache_contexts, x_drupal_cache_max_age, x_drupal_cache_tags,
                 console_messages_str, watchdog_errors
             ])
             self.log_handle.flush()
