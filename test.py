@@ -3,6 +3,7 @@ import re
 import json
 import csv
 import datetime
+import hashlib
 import pymysql
 import phpserialize
 import asyncio
@@ -31,7 +32,8 @@ async def init_page(page, request):
     # Apply the blocking of unwanted resources
     spider = request.meta['spider']
     if not spider.save_screenshots:
-        await page.route("**/*", block_unwanted_resources)
+        await page.route("**/*", block_unwanted_resources) # Normally this is what we want for more efficient crawling
+        # await page.route("**/*", lambda route, request: route.continue_())  # Do not block any resources
     # If you have a custom script to add, include it here
     script_path = os.path.join(os.path.dirname(__file__), "custom_script.js")
     await page.add_init_script(path=script_path)
@@ -52,15 +54,15 @@ class DualDomainSpider(scrapy.Spider):
                 "--disable-font-subpixel-positioning",
                 "--disable-gpu",
                 "--disable-gpu-rasterization",
-            ]
+            ],
         },
         "ROBOTSTXT_OBEY": False,
         "CONCURRENT_REQUESTS": 8,
         "CONCURRENT_REQUESTS_PER_DOMAIN": 8,
         "COOKIES_ENABLED": False,
         "DOWNLOAD_DELAY": 0,
-        "DOWNLOAD_TIMEOUT": 30,
-        "PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT": 30000,
+        "DOWNLOAD_TIMEOUT": 60,
+        "PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT": 60000,
         "LOG_LEVEL": "WARNING",
         "AUTOTHROTTLE_ENABLED": False,
         "AUTOTHROTTLE_START_DELAY": 2,
@@ -70,14 +72,13 @@ class DualDomainSpider(scrapy.Spider):
     }
 
     def __init__(self, crawl_depth, reference, test, save_screenshots="false",
-                 same_page_with_url_parameters=False, lang="", remove_selectors="",
-                 reference_db="", test_db="", *args, **kwargs):
+                 lang="", remove_selectors="", reference_db="",
+                 test_db="", limit_same_url_with_parameters=0, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.crawl_depth = int(crawl_depth)
         self.start_reference = reference if reference else None
         self.test = test
         self.save_screenshots = str(save_screenshots).lower() in ("true", "1", "yes")
-        self.same_page_with_url_parameters = same_page_with_url_parameters
         self.target_lang = lang.lower() if lang else None
 
         self.reference_db_config = self.parse_db_url(reference_db) if reference_db else None
@@ -85,8 +86,10 @@ class DualDomainSpider(scrapy.Spider):
 
         self.remove_selectors = [sel.strip() for sel in remove_selectors.split(",")] if remove_selectors else []
 
-        # Deduplication sets for each phase.
-        self.seen_normalized = {1: set(), 2: set()}
+        # Use a dictionary mapping normalized URL (full URL with query parameters) to count for each phase.
+        self.seen_normalized = {1: {}, 2: {}}
+
+        self.limit_same_url_with_parameters = int(limit_same_url_with_parameters)
 
         self.domain1 = self.get_domain(reference) if reference else None
         self.domain2 = self.get_domain(test)
@@ -165,8 +168,13 @@ class DualDomainSpider(scrapy.Spider):
         folder = self.get_domain_folder(domain)
         return os.path.join("output", subfolder, folder, sanitized + default_ext)
 
-    def sanitize_path(self, path):
-        return re.sub(r'[<>:"/\\|?*]', "_", path)
+    def sanitize_path(self, path, max_length=255):
+        sanitized = re.sub(r'[<>:"/\\|?*]', "_", path)
+        if len(sanitized) > max_length:
+            hash_object = hashlib.md5(path.encode())
+            hash_hex = hash_object.hexdigest()[:8]  # Use the first 8 characters of the hash
+            sanitized = sanitized[:max_length - 9] + "_" + hash_hex  # Adjust length to accommodate hash and underscore
+        return sanitized
 
     def get_relative_path(self, url):
         parsed = urlparse(url)
@@ -184,12 +192,7 @@ class DualDomainSpider(scrapy.Spider):
 
     def normalize_url(self, url):
         parsed = urlparse(url)
-        if self.same_page_with_url_parameters:
-            relative = parsed.path
-            if parsed.query:
-                relative += "?" + parsed.query
-            return relative
-        return parsed.path
+        return parsed.geturl()
 
     def should_skip_page_due_to_language(self, response):
         """Return True if the page language is not empty and does not match the target language."""
@@ -204,13 +207,19 @@ class DualDomainSpider(scrapy.Spider):
                 return True
         return False
 
+    def get_duplicate_key(self, url):
+        parsed = urlparse(url)
+        # Use only scheme, hostname, and path for duplicate detection.
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
     def is_duplicate(self, response, phase):
-        """Return True if the normalized URL was already processed for the given phase."""
-        normalized = self.normalize_url(response.request.url)
-        if normalized in self.seen_normalized[phase]:
-            self.logger.info(f"Skipping duplicate phase {phase} URL: {normalized}")
+        # Always use the base URL (without query parameters) for duplicate detection.
+        key = self.get_duplicate_key(response.request.url)
+        count = self.seen_normalized[phase].get(key, 0)
+        if count >= self.limit_same_url_with_parameters:
+            self.logger.info(f"Skipping duplicate phase {phase} URL: {key} reached limit {count}")
             return True
-        self.seen_normalized[phase].add(normalized)
+        self.seen_normalized[phase][key] = count + 1
         return False
 
     def start_requests(self):
@@ -287,7 +296,12 @@ class DualDomainSpider(scrapy.Spider):
             metrics = await self.capture_performance_metrics(response)
 
             # Save HTML and Markdown outputs immediately.
-            self.save_html(response, domain)
+            if page:
+                html_content = await page.content()
+                self.save_html_content(html_content, response.request.url, domain)
+            else:
+                self.save_html(response, domain)
+
             self.save_markdown(response, domain)
 
             # Retrieve messages stored via our injected init script.
@@ -321,13 +335,22 @@ class DualDomainSpider(scrapy.Spider):
 
             # Follow internal links if within crawl depth.
             if current_depth < self.crawl_depth:
-                for req in self.follow_internal_links(response, current_depth + 1):
-                    yield req
+                if page:
+                    html_content = await page.content()
+                    for req in self.follow_internal_links(html_content, response, current_depth + 1):
+                        yield req
+                else:
+                    for req in self.follow_internal_links(response.text, response, current_depth + 1):
+                        yield req
 
         finally:
             # Ensure the Playwright page is closed to avoid resource leaks
             if page:
                 await page.close()
+
+    def save_html_content(self, html_content, url, domain):
+        file_path = self.get_output_filepath(domain, url, "html", ".html")
+        self.write_file(file_path, html_content, binary=False)
 
     async def capture_performance_metrics(self, response):
         metrics = {"ttfb": None, "dom_content_loaded": None, "load_event": None, "network_idle": None}
@@ -346,20 +369,36 @@ class DualDomainSpider(scrapy.Spider):
                 self.logger.error(f"Error capturing performance metrics for {response.request.url}: {e}")
         return metrics
 
-    def follow_internal_links(self, response, next_depth):
-        if not response.body.strip():
+    def follow_internal_links(self, html_content, response, next_depth):
+        if not html_content.strip():
             self.logger.error(f"Empty response body for URL: {response.request.url}")
             return
 
         links_followed = 0
-        for link in response.css("a::attr(href)").getall():
-            if link.lower().startswith(("javascript:", "mailto:", "tel:")):
+        soup = BeautifulSoup(html_content, "html.parser")
+        phase = response.meta.get("phase", 1)
+
+        for link in soup.select("a[href]"):
+            href = link.get("href")
+            if href.lower().startswith(("javascript:", "mailto:", "tel:")):
                 continue
-            abs_url = response.urljoin(link)
+            abs_url = response.urljoin(href)
             if not self.is_html_url(abs_url):
                 continue
-            if urlparse(abs_url).hostname != (self.domain1 if response.meta.get("phase", 1) == 1 else self.domain2):
+            if urlparse(abs_url).hostname != (self.domain1 if phase == 1 else self.domain2):
                 continue
+
+            # Check for duplicates BEFORE yielding new requests
+            duplicate_key = self.get_duplicate_key(abs_url)
+            count = self.seen_normalized[phase].get(duplicate_key, 0)
+
+            if self.limit_same_url_with_parameters > 0 and count >= self.limit_same_url_with_parameters:
+                self.logger.info(f"Skip scheduling duplicate URL: {duplicate_key} (count: {count})")
+                continue
+
+            # Update counter for this URL
+            self.seen_normalized[phase][duplicate_key] = count + 1
+
             links_followed += 1
             yield scrapy.Request(
                 url=abs_url,
@@ -368,9 +407,9 @@ class DualDomainSpider(scrapy.Spider):
                     "playwright": True,
                     "playwright_page_init_callback": init_page,
                     **self.build_meta(
-                        phase=response.meta.get("phase", 1),
+                        phase=phase,
                         depth=next_depth,
-                        auth=self.auth1 if response.meta.get("phase", 1) == 1 else self.auth2
+                        auth=self.auth1 if phase == 1 else self.auth2
                     )
                 },
                 errback=self.errback,
@@ -575,17 +614,20 @@ class DualDomainSpider(scrapy.Spider):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Dual domain crawler with comparison functionality.")
+    parser = argparse.ArgumentParser(
+        description="Dual domain crawler with comparison functionality."
+    )
     parser.add_argument("--reference", help="Starting URL for domain 1.")
     parser.add_argument("--test", required=True, help="Starting URL for domain 2.")
     parser.add_argument("--depth", type=int, default=4, help="Crawl depth.")
     parser.add_argument("--screenshots", action="store_true", help="Enable saving screenshots.")
-    parser.add_argument("--same-page-with-url-parameters", action="store_true",
-                        help="Treat pages with different query parameters as distinct.")
-    parser.add_argument("--lang", default="", help="Only process pages with <html lang='X'> matching this language (e.g., 'en').")
+    parser.add_argument("--lang", default="", help="Only process pages with <html lang=\'X\'> matching this language (e.g., \'en\').")
     parser.add_argument("--remove-selectors", default="", help="Comma-separated list of CSS selectors to remove before screenshot.")
     parser.add_argument("--reference-db", default="", help="MySQL connection string for the reference site (mysql://user:pass@host:port/dbname)")
     parser.add_argument("--test-db", default="", help="MySQL connection string for the test site (mysql://user:pass@host:port/dbname)")
+    # If not set or set to 0, no duplicate limit will be enforced.
+    parser.add_argument("--limit-same-url-with-parameters", type=int, default=0,
+                        help="Limit how many different requests to the same URL (including query parameters) are allowed.")
     args = parser.parse_args()
 
     process = CrawlerProcess()
@@ -595,10 +637,10 @@ if __name__ == "__main__":
         reference=args.reference,
         test=args.test,
         save_screenshots=args.screenshots,
-        same_page_with_url_parameters=args.same_page_with_url_parameters,
         lang=args.lang,
         remove_selectors=args.remove_selectors,
         reference_db=args.reference_db,
-        test_db=args.test_db
+        test_db=args.test_db,
+        limit_same_url_with_parameters=args.limit_same_url_with_parameters
     )
     process.start()
