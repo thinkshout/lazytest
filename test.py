@@ -60,11 +60,12 @@ class DualDomainSpider(scrapy.Spider):
         "CONCURRENT_REQUESTS": 8,
         "CONCURRENT_REQUESTS_PER_DOMAIN": 8,
         "COOKIES_ENABLED": False,
-        "DOWNLOAD_DELAY": 0,
-        "DOWNLOAD_TIMEOUT": 60,
-        "PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT": 60000,
+        "DOWNLOAD_DELAY": 1,
+        "DOWNLOAD_TIMEOUT": 30,
+        "PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT": 30000,
+        "PLAYWRIGHT_BROWSER_TYPE": "chromium",
         "LOG_LEVEL": "WARNING",
-        "AUTOTHROTTLE_ENABLED": False,
+        "AUTOTHROTTLE_ENABLED": True,
         "AUTOTHROTTLE_START_DELAY": 2,
         "AUTOTHROTTLE_MAX_DELAY": 60,
         "AUTOTHROTTLE_TARGET_CONCURRENCY": 1.0,
@@ -152,10 +153,15 @@ class DualDomainSpider(scrapy.Spider):
             "playwright_page_init_callback": init_page,
             "playwright_include_page": True,
             "spider": self,
-            "playwright_context": "new"
+            "playwright_context": "new",
+            "playwright_context_kwargs": {
+                "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+            }
         }
         if auth:
-            meta["playwright_context_kwargs"] = {"http_credentials": auth}
+            if "playwright_context_kwargs" not in meta:
+                meta["playwright_context_kwargs"] = {}
+            meta["playwright_context_kwargs"]["http_credentials"] = auth
         return meta
 
     def get_domain_folder(self, domain):
