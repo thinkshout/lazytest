@@ -57,15 +57,13 @@ class DualDomainSpider(scrapy.Spider):
             ],
         },
         "ROBOTSTXT_OBEY": False,
-        "CONCURRENT_REQUESTS": 8,
-        "CONCURRENT_REQUESTS_PER_DOMAIN": 8,
         "COOKIES_ENABLED": False,
         "DOWNLOAD_DELAY": 1,
-        "DOWNLOAD_TIMEOUT": 30,
-        "PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT": 30000,
+        "DOWNLOAD_TIMEOUT": 180,
+        "PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT": 180000,
         "PLAYWRIGHT_BROWSER_TYPE": "chromium",
         "LOG_LEVEL": "WARNING",
-        "AUTOTHROTTLE_ENABLED": True,
+        "AUTOTHROTTLE_ENABLED": False,
         "AUTOTHROTTLE_START_DELAY": 2,
         "AUTOTHROTTLE_MAX_DELAY": 60,
         "AUTOTHROTTLE_TARGET_CONCURRENCY": 1.0,
@@ -74,11 +72,16 @@ class DualDomainSpider(scrapy.Spider):
 
     def __init__(self, crawl_depth, reference, test, save_screenshots="false",
                  lang="", remove_selectors="", reference_db="",
-                 test_db="", limit_same_url_with_parameters=0, *args, **kwargs):
+                 test_db="", limit_same_url_with_parameters=0,
+                 delay_before_capture=0, exclude_paths="",
+                 exclude_links_inside_classes="", *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        # Trim trailing slashes for consistency.
+        self.start_reference = reference.rstrip("/") if reference else None
+        self.test = test.rstrip("/") if test else None
+
         self.crawl_depth = int(crawl_depth)
-        self.start_reference = reference if reference else None
-        self.test = test
         self.save_screenshots = str(save_screenshots).lower() in ("true", "1", "yes")
         self.target_lang = lang.lower() if lang else None
 
@@ -86,17 +89,23 @@ class DualDomainSpider(scrapy.Spider):
         self.test_db_config = self.parse_db_url(test_db) if test_db else None
 
         self.remove_selectors = [sel.strip() for sel in remove_selectors.split(",")] if remove_selectors else []
+        # Compile exclude‑path regexes (comma‑separated list)
+        self.exclude_patterns = [re.compile(p.strip()) for p in exclude_paths.split(",") if p.strip()]
+        self.exclude_links_inside_classes = [
+            c.strip() for c in exclude_links_inside_classes.split(",") if c.strip()
+        ]
 
         # Use a dictionary mapping normalized URL (full URL with query parameters) to count for each phase.
         self.seen_normalized = {1: {}, 2: {}}
 
         self.limit_same_url_with_parameters = int(limit_same_url_with_parameters)
+        self.delay_before_capture = float(delay_before_capture)
 
-        self.domain1 = self.get_domain(reference) if reference else None
-        self.domain2 = self.get_domain(test)
+        self.domain1 = self.get_domain(self.start_reference) if self.start_reference else None
+        self.domain2 = self.get_domain(self.test)
 
-        self.auth1 = self.get_auth_info(reference) if reference else None
-        self.auth2 = self.get_auth_info(test)
+        self.auth1 = self.get_auth_info(self.start_reference) if self.start_reference else None
+        self.auth2 = self.get_auth_info(self.test)
 
         self.create_output_dirs()
 
@@ -213,6 +222,25 @@ class DualDomainSpider(scrapy.Spider):
                 return True
         return False
 
+    def should_exclude(self, url):
+        """Return True when the URL matches any exclude-path regex."""
+        return any(p.search(url) for p in self.exclude_patterns)
+
+    def link_in_excluded_section(self, link_tag):
+        """
+        Return True when the <a> tag is inside any ancestor element
+        whose class attribute contains one of the excluded class names.
+        """
+        if not self.exclude_links_inside_classes:
+            return False
+        for ancestor in link_tag.parents:
+            if not hasattr(ancestor, "get"):  # Reached BeautifulSoup root
+                return False
+            classes = ancestor.get("class", [])
+            if any(cls in classes for cls in self.exclude_links_inside_classes):
+                return True
+        return False
+
     def get_duplicate_key(self, url):
         parsed = urlparse(url)
         # Use only scheme, hostname, and path for duplicate detection.
@@ -229,28 +257,20 @@ class DualDomainSpider(scrapy.Spider):
         return False
 
     def start_requests(self):
-        if self.start_reference:
-            yield scrapy.Request(
-                url=self.start_reference,
-                callback=self.parse_page,
-                meta={
-                    "playwright": True,
-                    "playwright_page_init_callback": init_page,
-                    **self.build_meta(phase=1, depth=0, auth=self.auth1)
-                },
-                errback=self.errback,
-            )
-        else:
-            yield scrapy.Request(
-                url=self.test,
-                callback=self.parse_page,
-                meta={
-                    "playwright": True,
-                    "playwright_page_init_callback": init_page,
-                    **self.build_meta(phase=2, depth=0, auth=self.auth2)
-                },
-                errback=self.errback,
-            )
+        """Begin crawl only on the TEST domain (phase 2)."""
+        if self.should_exclude(self.test):
+            self.logger.info(f"Skipping excluded start URL: {self.test}")
+            return
+        yield scrapy.Request(
+            url=self.test,
+            callback=self.parse_page,
+            meta={
+                "playwright": True,
+                "playwright_page_init_callback": init_page,
+                **self.build_meta(phase=2, depth=0, auth=self.auth2)
+            },
+            errback=self.errback,
+        )
 
     def errback(self, failure):
         request = failure.request
@@ -279,6 +299,9 @@ class DualDomainSpider(scrapy.Spider):
         phase = response.meta.get("phase", 1)
         current_depth = response.meta.get("depth", 0)
         domain = self.domain1 if phase == 1 else self.domain2
+        # Skip if URL matches an exclude-path pattern
+        if self.should_exclude(response.request.url):
+            return
 
         # Get the Playwright page reference
         page = response.meta.get("playwright_page")
@@ -300,6 +323,9 @@ class DualDomainSpider(scrapy.Spider):
 
             # Capture performance metrics.
             metrics = await self.capture_performance_metrics(response)
+            # Optional delay before capturing markup and text
+            if self.delay_before_capture > 0:
+                await asyncio.sleep(self.delay_before_capture)
 
             # Save HTML and Markdown outputs immediately.
             if page:
@@ -327,20 +353,21 @@ class DualDomainSpider(scrapy.Spider):
             if self.save_screenshots:
                 await self.process_screenshot(response, domain)
 
-            # Schedule corresponding test page if in phase 1 and reference is provided.
-            if phase == 1 and self.start_reference:
+            # Schedule corresponding reference page when we're on the TEST site (phase 2).
+            if phase == 2 and self.start_reference:
                 relative_request = self.get_request_relative_url(response.request.url)
-                abs_test = urljoin(self.test, relative_request)
-                yield scrapy.Request(
-                    url=abs_test,
-                    callback=self.parse_page,
-                    meta=self.build_meta(phase=2, depth=current_depth, auth=self.auth2),
-                    errback=self.errback,
-                    dont_filter=True,
-                )
+                abs_ref = urljoin(self.start_reference, relative_request)
+                if not self.should_exclude(abs_ref):
+                    yield scrapy.Request(
+                        url=abs_ref,
+                        callback=self.parse_page,
+                        meta=self.build_meta(phase=1, depth=current_depth, auth=self.auth1),
+                        errback=self.errback,
+                        dont_filter=True,
+                    )
 
-            # Follow internal links if within crawl depth.
-            if current_depth < self.crawl_depth:
+            # Follow internal links **only** for the test site (phase 2).
+            if phase == 2 and current_depth < self.crawl_depth:
                 if page:
                     html_content = await page.content()
                     for req in self.follow_internal_links(html_content, response, current_depth + 1):
@@ -385,10 +412,14 @@ class DualDomainSpider(scrapy.Spider):
         phase = response.meta.get("phase", 1)
 
         for link in soup.select("a[href]"):
+            if self.link_in_excluded_section(link):
+                continue
             href = link.get("href")
             if href.lower().startswith(("javascript:", "mailto:", "tel:")):
                 continue
             abs_url = response.urljoin(href)
+            if self.should_exclude(abs_url):
+                continue
             if not self.is_html_url(abs_url):
                 continue
             if urlparse(abs_url).hostname != (self.domain1 if phase == 1 else self.domain2):
@@ -465,6 +496,8 @@ class DualDomainSpider(scrapy.Spider):
 
     async def process_screenshot(self, response, domain):
         page = response.meta.get("playwright_page")
+        if self.delay_before_capture > 0:
+            await asyncio.sleep(self.delay_before_capture)
         if not page:
             self.logger.error("No playwright_page in meta for screenshot!")
             return
@@ -631,12 +664,24 @@ if __name__ == "__main__":
     parser.add_argument("--remove-selectors", default="", help="Comma-separated list of CSS selectors to remove before screenshot.")
     parser.add_argument("--reference-db", default="", help="MySQL connection string for the reference site (mysql://user:pass@host:port/dbname)")
     parser.add_argument("--test-db", default="", help="MySQL connection string for the test site (mysql://user:pass@host:port/dbname)")
-    # If not set or set to 0, no duplicate limit will be enforced.
     parser.add_argument("--limit-same-url-with-parameters", type=int, default=0,
                         help="Limit how many different requests to the same URL (including query parameters) are allowed.")
+    parser.add_argument("--delay-before-capture", type=float, default=0,
+                        help="Delay in seconds before capturing markup, text, and screenshots.")
+    parser.add_argument("--concurrent-requests", dest="concurrent_requests",
+                        type=int, default=8,
+                        help="Maximum concurrent requests Scrapy should perform (Scrapy setting CONCURRENT_REQUESTS).")
+    parser.add_argument("--exclude-paths", default="",
+                        help="Comma-separated list of regex patterns; any URL matching a pattern will be skipped.")
+    parser.add_argument("--exclude-links-inside-classes", dest="exclude_links_inside_classes", default="",
+                        help=("Comma-separated CSS class names; any <a> tag that is "
+                              "inside an element with one of these classes will be skipped."))
     args = parser.parse_args()
+    # Ensure the attribute exists even if parser failed to create it for some reason
+    if not hasattr(args, "exclude_links_inside_classes"):
+        setattr(args, "exclude_links_inside_classes", "")
 
-    process = CrawlerProcess()
+    process = CrawlerProcess(settings={"CONCURRENT_REQUESTS": args.concurrent_requests})
     process.crawl(
         DualDomainSpider,
         crawl_depth=args.depth,
@@ -647,6 +692,9 @@ if __name__ == "__main__":
         remove_selectors=args.remove_selectors,
         reference_db=args.reference_db,
         test_db=args.test_db,
-        limit_same_url_with_parameters=args.limit_same_url_with_parameters
+        limit_same_url_with_parameters=args.limit_same_url_with_parameters,
+        delay_before_capture=args.delay_before_capture,
+        exclude_paths=args.exclude_paths,
+        exclude_links_inside_classes=getattr(args, "exclude_links_inside_classes", "")
     )
     process.start()
