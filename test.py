@@ -58,7 +58,7 @@ class DualDomainSpider(scrapy.Spider):
         },
         "ROBOTSTXT_OBEY": False,
         "COOKIES_ENABLED": False,
-        "DOWNLOAD_DELAY": 1,
+        "DOWNLOAD_DELAY": 0,
         "DOWNLOAD_TIMEOUT": 180,
         "PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT": 180000,
         "PLAYWRIGHT_BROWSER_TYPE": "chromium",
@@ -88,7 +88,18 @@ class DualDomainSpider(scrapy.Spider):
         self.reference_db_config = self.parse_db_url(reference_db) if reference_db else None
         self.test_db_config = self.parse_db_url(test_db) if test_db else None
 
-        self.remove_selectors = [sel.strip() for sel in remove_selectors.split(",")] if remove_selectors else []
+        # Process selectors to ensure they're proper CSS selectors
+        self.remove_selectors = []
+        if remove_selectors:
+            for sel in remove_selectors.split(","):
+                sel = sel.strip()
+                if sel:
+                    # If the selector doesn't start with a CSS selector character, 
+                    # assume it's a class name and prepend with '.'
+                    if not sel.startswith(('.', '#', '[', '*', ':', '>')) and not ' ' in sel:
+                        sel = f".{sel}"
+                    self.remove_selectors.append(sel)
+                    
         # Compile exclude‑path regexes (comma‑separated list)
         self.exclude_patterns = [re.compile(p.strip()) for p in exclude_paths.split(",") if p.strip()]
         self.exclude_links_inside_classes = [
@@ -136,7 +147,7 @@ class DualDomainSpider(scrapy.Spider):
             "timestamp", "request url", "final url", "response_code", "ttfb (ms)",
             "dom_content_loaded (ms)", "load_event (ms)", "network_idle (ms)",
             "age", "cache-control", "date", "expires",
-            "last-modified", "x-cache", "x-cache-hits", "x-drupal-dynamic-cache", "vary", "set-cookie", "x-drupal-cache-contexts", "x-drupal-cache-max-age", "x-drupal-cache-tags",
+            "last-modified", "cf-cache-status", "x-cache", "x-cache-hits", "x-drupal-dynamic-cache", "vary", "set-cookie", "x-drupal-cache-contexts", "x-drupal-cache-max-age", "x-drupal-cache-tags",
             "console_messages", "watchdog_errors"
         ])
 
@@ -307,83 +318,107 @@ class DualDomainSpider(scrapy.Spider):
         page = response.meta.get("playwright_page")
 
         try:
-            # Check if the response content type is text-based
-            content_type = response.headers.get('Content-Type', b'').decode('utf-8')
-            if not content_type.startswith('text'):
-                self.logger.error(f"Skipping non-text response: {response.request.url} (Content-Type: {content_type})")
-                return
+            collected_requests = []
 
-            # Skip if language doesn’t match.
-            if self.should_skip_page_due_to_language(response):
-                return
+            async def _core_runner():
+                async for req in self._parse_core(response, phase, current_depth, domain, page):
+                    collected_requests.append(req)
 
-            # Deduplicate URL.
-            if self.is_duplicate(response, phase):
-                return
-
-            # Capture performance metrics.
-            metrics = await self.capture_performance_metrics(response)
-            # Optional delay before capturing markup and text
-            if self.delay_before_capture > 0:
-                await asyncio.sleep(self.delay_before_capture)
-
-            # Save HTML and Markdown outputs immediately.
-            if page:
-                html_content = await page.content()
-                self.save_html_content(html_content, response.request.url, domain)
-            else:
-                self.save_html(response, domain)
-
-            self.save_markdown(response, domain)
-
-            # Retrieve messages stored via our injected init script.
-            console_messages = []
-            if page:
-                try:
-                    console_messages = await page.evaluate("() => window.__consoleMessages || []")
-                    if console_messages:
-                        self.logger.info(f"Console messages: {console_messages}")
-                except Exception as e:
-                    self.logger.error(f"Error retrieving console messages: {e}")
-
-            # Log the metrics along with the console messages.
-            self.log_load_metrics(response.request.url, response.url, response.status, metrics, phase, console_messages, response)
-
-            # Process screenshot if enabled.
-            if self.save_screenshots:
-                await self.process_screenshot(response, domain)
-
-            # Schedule corresponding reference page when we're on the TEST site (phase 2).
-            if phase == 2 and self.start_reference:
-                relative_request = self.get_request_relative_url(response.request.url)
-                abs_ref = urljoin(self.start_reference, relative_request)
-                if not self.should_exclude(abs_ref):
-                    yield scrapy.Request(
-                        url=abs_ref,
-                        callback=self.parse_page,
-                        meta=self.build_meta(phase=1, depth=current_depth, auth=self.auth1),
-                        errback=self.errback,
-                        dont_filter=True,
-                    )
-
-            # Follow internal links **only** for the test site (phase 2).
-            if phase == 2 and current_depth < self.crawl_depth:
-                if page:
-                    html_content = await page.content()
-                    for req in self.follow_internal_links(html_content, response, current_depth + 1):
-                        yield req
-                else:
-                    for req in self.follow_internal_links(response.text, response, current_depth + 1):
-                        yield req
-
+            await asyncio.wait_for(_core_runner(), timeout=120)  # whole parse timeout
+            # Yield any requests produced by _parse_core
+            for req in collected_requests:
+                yield req
+        except asyncio.TimeoutError:
+            self.logger.warning(f"Whole parse timed‑out (120 s) for {response.request.url}")
+        except Exception as e:
+            self.logger.error(f"Unhandled error in parse_page for {response.request.url}: {e}")
         finally:
+            # Log completion for debugging
+            self.logger.info(f"Finished parse of {response.request.url}")
             # Ensure the Playwright page is closed to avoid resource leaks
             if page:
                 await page.close()
 
-    def save_html_content(self, html_content, url, domain):
-        file_path = self.get_output_filepath(domain, url, "html", ".html")
-        self.write_file(file_path, html_content, binary=False)
+    async def _parse_core(self, response, phase, current_depth, domain, page):
+        """
+        All the existing logic from parse_page is moved here so we can wrap it
+        with asyncio.wait_for in the outer method.
+        """
+        # --- BEGIN moved logic ---
+        # Check if the response content type is text-based
+        content_type = response.headers.get('Content-Type', b'').decode('utf-8')
+        if not content_type.startswith('text'):
+            self.logger.error(f"Skipping non-text response: {response.request.url} (Content-Type: {content_type})")
+            return
+
+        # Skip if language doesn’t match.
+        if self.should_skip_page_due_to_language(response):
+            return
+
+        # Deduplicate URL.
+        if self.is_duplicate(response, phase):
+            return
+
+        # Capture performance metrics.
+        metrics = await self.capture_performance_metrics(response)
+        # Optional delay before capturing markup and text
+        if self.delay_before_capture > 0:
+            await asyncio.sleep(self.delay_before_capture)
+
+        # Remove unwanted selectors from the page before saving content
+        if page:
+            await self.remove_unwanted_selectors(page)
+            # Get content AFTER removing unwanted selectors
+            html_content = await page.content()
+            self.save_html_content(html_content, response.request.url, domain)
+            # Use the cleaned HTML for markdown conversion as well
+            self.save_markdown_from_content(html_content, response.request.url, domain)
+        else:
+            # For non-Playwright responses, we'll clean the HTML manually
+            html_content = response.text
+            cleaned_html = self.apply_selector_removal_to_html(html_content)
+            self.save_html_content(cleaned_html, response.request.url, domain)
+            self.save_markdown_from_content(cleaned_html, response.request.url, domain)
+
+        # Retrieve messages stored via our injected init script.
+        console_messages = []
+        if page:
+            try:
+                console_messages = await page.evaluate("() => window.__consoleMessages || []")
+                if console_messages:
+                    self.logger.info(f"Console messages: {console_messages}")
+            except Exception as e:
+                self.logger.error(f"Error retrieving console messages: {e}")
+
+        # Log the metrics along with the console messages.
+        self.log_load_metrics(response.request.url, response.url, response.status, metrics, phase, console_messages, response)
+
+        # Process screenshot if enabled.
+        if self.save_screenshots:
+            await self.process_screenshot(response, domain)
+
+        # Schedule corresponding reference page when we're on the TEST site (phase 2).
+        if phase == 2 and self.start_reference:
+            relative_request = self.get_request_relative_url(response.request.url)
+            abs_ref = urljoin(self.start_reference, relative_request)
+            if not self.should_exclude(abs_ref):
+                yield scrapy.Request(
+                    url=abs_ref,
+                    callback=self.parse_page,
+                    meta=self.build_meta(phase=1, depth=current_depth, auth=self.auth1),
+                    errback=self.errback,
+                    dont_filter=True,
+                )
+
+        # Follow internal links **only** for the test site (phase 2).
+        if phase == 2 and current_depth < self.crawl_depth:
+            if page:
+                html_content = await page.content()
+                for req in self.follow_internal_links(html_content, response, current_depth + 1):
+                    yield req
+            else:
+                for req in self.follow_internal_links(response.text, response, current_depth + 1):
+                    yield req
 
     async def capture_performance_metrics(self, response):
         metrics = {"ttfb": None, "dom_content_loaded": None, "load_event": None, "network_idle": None}
@@ -396,7 +431,13 @@ class DualDomainSpider(scrapy.Spider):
                 metrics["ttfb"] = timing.get("responseStart", 0) - nav_start
                 metrics["dom_content_loaded"] = timing.get("domContentLoadedEventEnd", 0) - nav_start
                 metrics["load_event"] = timing.get("loadEventEnd", 0) - nav_start
-                await page.wait_for_load_state("networkidle")
+                try:
+                    # Wait up to 60 seconds (60 000 ms) for network to go idle
+                    await page.wait_for_load_state("networkidle", timeout=60_000)
+                except Exception as e:
+                    self.logger.warning(
+                        f"Timed out after 60 s waiting for networkidle on {response.request.url}: {e}"
+                    )
                 metrics["network_idle"] = await page.evaluate("() => performance.now()")
             except Exception as e:
                 self.logger.error(f"Error capturing performance metrics for {response.request.url}: {e}")
@@ -460,11 +501,39 @@ class DualDomainSpider(scrapy.Spider):
         return not any(urlparse(url).path.lower().endswith(ext) for ext in non_html_ext)
 
     def save_html(self, response, domain):
+        """Legacy method maintained for compatibility"""
+        cleaned_html = self.apply_selector_removal_to_html(response.text)
         file_path = self.get_output_filepath(domain, response.request.url, "html", ".html")
-        self.write_file(file_path, response.body, binary=True)
+        self.write_file(file_path, cleaned_html, binary=False)
+
+    def save_html_content(self, html_content, url, domain):
+        """
+        Save raw HTML text that we already fetched from a Playwright page.
+        """
+        file_path = self.get_output_filepath(domain, url, "html", ".html")
+        self.write_file(file_path, html_content, binary=False)
+
+    def apply_selector_removal_to_html(self, html_content):
+        """Apply selector removal using BeautifulSoup for non-Playwright content"""
+        if not self.remove_selectors:
+            return html_content
+            
+        soup = BeautifulSoup(html_content, "html.parser")
+        for selector in self.remove_selectors:
+            for element in soup.select(selector):
+                element.decompose()
+        return str(soup)
 
     def clean_html(self, html):
+        """Clean HTML for text extraction, removing scripts, styles, and images"""
         soup = BeautifulSoup(html, "html.parser")
+        
+        # First apply custom selector removal
+        for selector in self.remove_selectors:
+            for element in soup.select(selector):
+                element.decompose()
+                
+        # Then do standard cleanup
         for tag in soup.find_all(['script', 'style', 'img']):
             tag.decompose()
         # Unwrap all <div> elements (in case of nested wrappers)
@@ -475,24 +544,37 @@ class DualDomainSpider(scrapy.Spider):
         return str(soup)
 
     def save_markdown(self, response, domain):
-        file_path = self.get_output_filepath(domain, response.request.url, "text", ".md")
+        """Legacy method maintained for compatibility"""
+        cleaned_html = self.clean_html(response.text)
+        self.save_markdown_from_content(cleaned_html, response.request.url, domain)
+
+    def save_markdown_from_content(self, html_content, url, domain):
+        file_path = self.get_output_filepath(domain, url, "text", ".md")
         try:
-            cleaned_html = self.clean_html(response.text)
+            cleaned_html = self.clean_html(html_content)
             markdown_text = pypandoc.convert_text(cleaned_html, 'md', format='html')
             markdown_text = re.sub(r'</?div>', '', markdown_text)
         except Exception as e:
-            self.logger.error(f"Pandoc conversion failed for {response.request.url}: {e}")
+            self.logger.error(f"Pandoc conversion failed for {url}: {e}")
             markdown_text = "Conversion failed."
         self.write_file(file_path, markdown_text, binary=False)
 
     async def remove_unwanted_selectors(self, page):
         """Remove CSS selectors specified in self.remove_selectors from the page."""
         for sel in self.remove_selectors:
-            await page.evaluate(
-                f"""() => {{
-                    document.querySelectorAll('{sel}').forEach(e => e.remove());
-                }}"""
-            )
+            try:
+                # First count the elements to remove
+                count = await page.evaluate(f"() => document.querySelectorAll('{sel}').length")
+                if count > 0:
+                    self.logger.info(f"Removing {count} elements matching selector: {sel}")
+                    # Then remove them
+                    await page.evaluate(
+                        f"""() => {{
+                            document.querySelectorAll('{sel}').forEach(e => e.remove());
+                        }}"""
+                    )
+            except Exception as e:
+                self.logger.error(f"Error removing selector '{sel}': {e}")
 
     async def process_screenshot(self, response, domain):
         page = response.meta.get("playwright_page")
@@ -501,7 +583,7 @@ class DualDomainSpider(scrapy.Spider):
         if not page:
             self.logger.error("No playwright_page in meta for screenshot!")
             return
-        await self.remove_unwanted_selectors(page)
+        # Remove unwanted selectors is already called earlier in the process
         file_path = self.get_output_filepath(domain, response.request.url, "screenshots", ".png")
         await page.screenshot(path=file_path, full_page=True)
         self.logger.info(f"Saved screenshot: {file_path}")
@@ -540,6 +622,7 @@ class DualDomainSpider(scrapy.Spider):
             date = headers.get("Date", b"").decode("utf-8")
             expires = headers.get("Expires", b"").decode("utf-8")
             last_modified = headers.get("Last-Modified", b"").decode("utf-8")
+            cf_cache_status = headers.get("CF-Cache-Status", b"").decode("utf-8")
             x_cache = headers.get("X-Cache", b"").decode("utf-8")
             x_cache_hits = headers.get("X-Cache-Hits", b"").decode("utf-8")
             x_drupal_dynamic_cache = headers.get("X-Drupal-Dynamic-Cache", b"").decode("utf-8")
@@ -552,7 +635,7 @@ class DualDomainSpider(scrapy.Spider):
             self.log_writer.writerow([
                 timestamp, url_request, final_url_to_print, response_code, ttfb, dcl, load_evt, network_idle,
                 age, cache_control, date, expires,
-                last_modified, x_cache, x_cache_hits, x_drupal_dynamic_cache, vary, set_cookie, x_drupal_cache_contexts, x_drupal_cache_max_age, x_drupal_cache_tags,
+                last_modified, cf_cache_status, x_cache, x_cache_hits, x_drupal_dynamic_cache, vary, set_cookie, x_drupal_cache_contexts, x_drupal_cache_max_age, x_drupal_cache_tags,
                 console_messages_str, watchdog_errors
             ])
             self.log_handle.flush()
@@ -698,3 +781,4 @@ if __name__ == "__main__":
         exclude_links_inside_classes=getattr(args, "exclude_links_inside_classes", "")
     )
     process.start()
+

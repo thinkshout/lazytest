@@ -51,3 +51,12 @@ Just a test site (no reference):
 
 ## Todo/Ideas
 * Add cache hits/misses to log
+
+## Ways to minimize false positives
+* copy live database to both test (usually a multidev) and reference sites (usually test or dev) at the same time. terminus env:clone-content site.sourceenv targetenv
+* Database updates and config import: drush updb, drush cim
+* Disable cron jobs: drush ev "\$jobs = \Drupal::entityTypeManager()->getStorage('ultimate_cron_job')->loadMultiple(); foreach(\$jobs as \$job){\$job->set('status', 0)->save(); }"
+* Reset search: drush sapi-c, drush sapi-r, drush sapi-i
+* Clear logs: drush sqlq "TRUNCATE watchdog;"
+* Clear cache: drush cr
+* run test
