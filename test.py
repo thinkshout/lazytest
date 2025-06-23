@@ -13,10 +13,12 @@ from urllib.parse import urlparse, urljoin
 import scrapy
 from scrapy.crawler import CrawlerProcess
 from scrapy import signals
+from itertools import cycle
 
 import pypandoc  # For HTML-to-Markdown conversion
 from scrapy_playwright.page import PageMethod
 from bs4 import BeautifulSoup  # For cleaning HTML and checking language
+import time
 
 # Set the logging level for pypandoc to WARNING
 import logging
@@ -25,10 +27,11 @@ logging.getLogger("pypandoc").setLevel(logging.WARNING)
 # Add safe_close helper function
 async def safe_close(page):
     try:
-        await page.close()
+        if page and not page.is_closed():
+            await page.close()
     except Exception as e:
         # Optionally log the error if needed.
-        # For example: print(f"safe_close error: {e}")
+        # logging.warning(f"safe_close error: {e}")
         pass
 
 async def block_unwanted_resources(route, request):
@@ -38,12 +41,16 @@ async def block_unwanted_resources(route, request):
         await route.continue_()
 
 async def init_page(page, request):
-    # Apply the blocking of unwanted resources
+    # Bail out early if Playwright did not hand us a real Page object
+    if page is None:
+        return
+
     spider = request.meta['spider']
+    page.set_default_navigation_timeout(120000)  # 120 s per page
     if not spider.save_screenshots:
-        await page.route("**/*", block_unwanted_resources) # Normally this is what we want for more efficient crawling
-        # await page.route("**/*", lambda route, request: route.continue_())  # Do not block any resources
-    # If you have a custom script to add, include it here
+        # Block non‑essential assets for speed
+        await page.route("**/*", block_unwanted_resources)
+    # Inject any custom script
     script_path = os.path.join(os.path.dirname(__file__), "custom_script.js")
     await page.add_init_script(path=script_path)
 
@@ -68,10 +75,10 @@ class DualDomainSpider(scrapy.Spider):
         "ROBOTSTXT_OBEY": False,
         "COOKIES_ENABLED": False,
         "DOWNLOAD_DELAY": 0,
-        "DOWNLOAD_TIMEOUT": 180,
-        "PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT": 180000,
+        "DOWNLOAD_TIMEOUT": 120,
+        "PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT": 120000,
         "PLAYWRIGHT_BROWSER_TYPE": "chromium",
-        "LOG_LEVEL": "WARNING",
+        "LOG_LEVEL": "INFO",
         "AUTOTHROTTLE_ENABLED": False,
         "AUTOTHROTTLE_START_DELAY": 2,
         "AUTOTHROTTLE_MAX_DELAY": 60,
@@ -97,27 +104,21 @@ class DualDomainSpider(scrapy.Spider):
         self.reference_db_config = self.parse_db_url(reference_db) if reference_db else None
         self.test_db_config = self.parse_db_url(test_db) if test_db else None
 
-        # Process selectors to ensure they're proper CSS selectors
         self.remove_selectors = []
         if remove_selectors:
             for sel in remove_selectors.split(","):
                 sel = sel.strip()
                 if sel:
-                    # If the selector doesn't start with a CSS selector character, 
-                    # assume it's a class name and prepend with '.'
                     if not sel.startswith(('.', '#', '[', '*', ':', '>')) and not ' ' in sel:
                         sel = f".{sel}"
                     self.remove_selectors.append(sel)
-                    
-        # Compile exclude‑path regexes (comma‑separated list)
+
         self.exclude_patterns = [re.compile(p.strip()) for p in exclude_paths.split(",") if p.strip()]
         self.exclude_links_inside_classes = [
             c.strip() for c in exclude_links_inside_classes.split(",") if c.strip()
         ]
 
-        # Use a dictionary mapping normalized URL (full URL with query parameters) to count for each phase.
         self.seen_normalized = {1: {}, 2: {}}
-
         self.limit_same_url_with_parameters = int(limit_same_url_with_parameters)
         self.delay_before_capture = float(delay_before_capture)
 
@@ -133,8 +134,10 @@ class DualDomainSpider(scrapy.Spider):
         self.log_handle = None
         self.log_writer = None
 
+        # ## FIX: Initialize context_pool to None. It will be set in from_crawler.
+        self.context_pool = None
+
     def create_output_dirs(self):
-        """Create output directories for html, text, and screenshots for both domains."""
         base = "output"
         subfolders = ["html", "text", "screenshots"]
         for sub in subfolders:
@@ -144,9 +147,16 @@ class DualDomainSpider(scrapy.Spider):
 
     @classmethod
     def from_crawler(cls, crawler, *args, **kwargs):
+        # ## FIX: This is the correct place for settings-dependent initialization.
+        # `super().from_crawler` creates the spider instance and attaches the settings.
         spider = super().from_crawler(crawler, *args, **kwargs)
         crawler.signals.connect(spider.spider_opened, signal=signals.spider_opened)
         crawler.signals.connect(spider.spider_closed, signal=signals.spider_closed)
+
+        # Now `spider.settings` is available. We can set up the context pool.
+        concurrency = spider.settings.getint("CONCURRENT_REQUESTS", 8)
+        spider.context_pool = cycle([f"context-{i}" for i in range(concurrency)])
+
         return spider
 
     def spider_opened(self, spider):
@@ -182,19 +192,13 @@ class DualDomainSpider(scrapy.Spider):
             "playwright_page_init_callback": init_page,
             "playwright_include_page": True,
             "spider": self,
-            "playwright_context": "new",
-            "playwright_context_kwargs": {
-                "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-            }
+            "playwright_context": next(self.context_pool),
         }
-        if auth:
-            if "playwright_context_kwargs" not in meta:
-                meta["playwright_context_kwargs"] = {}
-            meta["playwright_context_kwargs"]["http_credentials"] = auth
+        # Note: http_credentials should be set on the context, not the request.
+        # This implementation assumes the context is pre-configured with auth if needed.
         return meta
 
     def get_domain_folder(self, domain):
-        """Return 'reference' if the domain matches the reference; otherwise, 'test'."""
         return "reference" if domain == self.domain1 else "test"
 
     def get_output_filepath(self, domain, url, subfolder, default_ext):
@@ -207,8 +211,8 @@ class DualDomainSpider(scrapy.Spider):
         sanitized = re.sub(r'[<>:"/\\|?*]', "_", path)
         if len(sanitized) > max_length:
             hash_object = hashlib.md5(path.encode())
-            hash_hex = hash_object.hexdigest()[:8]  # Use the first 8 characters of the hash
-            sanitized = sanitized[:max_length - 9] + "_" + hash_hex  # Adjust length to accommodate hash and underscore
+            hash_hex = hash_object.hexdigest()[:8]
+            sanitized = sanitized[:max_length - 9] + "_" + hash_hex
         return sanitized
 
     def get_relative_path(self, url):
@@ -230,7 +234,6 @@ class DualDomainSpider(scrapy.Spider):
         return parsed.geturl()
 
     def should_skip_page_due_to_language(self, response):
-        """Return True if the page language is not empty and does not match the target language."""
         if self.target_lang:
             soup = BeautifulSoup(response.text, "html.parser")
             html_tag = soup.find("html")
@@ -243,56 +246,46 @@ class DualDomainSpider(scrapy.Spider):
         return False
 
     def should_exclude(self, url):
-        """Return True when the URL matches any exclude-path regex."""
         return any(p.search(url) for p in self.exclude_patterns)
 
     def link_in_excluded_section(self, link_tag):
-        """
-        Return True when the <a> tag is inside any ancestor element
-        whose class attribute contains one of the excluded class names.
-        """
         if not self.exclude_links_inside_classes:
             return False
         for ancestor in link_tag.parents:
-            if not hasattr(ancestor, "get"):  # Reached BeautifulSoup root
+            if not hasattr(ancestor, "get"):
                 return False
             classes = ancestor.get("class", [])
             if any(cls in classes for cls in self.exclude_links_inside_classes):
                 return True
         return False
 
-    def get_duplicate_key(self, url):
+    def get_duplicate_path_key(self, url):
         parsed = urlparse(url)
-        # Use only scheme, hostname, and path for duplicate detection.
         return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
     def is_duplicate(self, response, phase):
-        # Always use the base URL (without query parameters) for duplicate detection.
-        key = self.get_duplicate_key(response.request.url)
+        key = self.get_duplicate_path_key(response.request.url)
         count = self.seen_normalized[phase].get(key, 0)
-        if count >= self.limit_same_url_with_parameters:
-            self.logger.info(f"Skipping duplicate phase {phase} URL: {key} reached limit {count}")
+
+        if self.limit_same_url_with_parameters > 0 and count >= self.limit_same_url_with_parameters:
+            self.logger.info(f"Skipping duplicate path in phase {phase} URL: {key} (limit {self.limit_same_url_with_parameters} reached)")
             return True
+
         self.seen_normalized[phase][key] = count + 1
         return False
 
     def start_requests(self):
-        """Begin crawl only on the TEST domain (phase 2)."""
         if self.should_exclude(self.test):
             self.logger.info(f"Skipping excluded start URL: {self.test}")
             return
         yield scrapy.Request(
             url=self.test,
             callback=self.parse_page,
-            meta={
-                "playwright": True,
-                "playwright_page_init_callback": init_page,
-                **self.build_meta(phase=2, depth=0, auth=self.auth2)
-            },
+            meta=self.build_meta(phase=2, depth=0, auth=self.auth2),
             errback=self.errback,
         )
 
-    def errback(self, failure):
+    async def errback(self, failure):
         request = failure.request
         response_code = "N/A"
 
@@ -303,111 +296,73 @@ class DualDomainSpider(scrapy.Spider):
 
         self.logger.error(f"Request failed: {request.url}. Response code: {response_code}")
 
-        # Use safe_close instead of direct page.close
         page = request.meta.get("playwright_page")
         if page:
-            asyncio.create_task(safe_close(page))
+            await safe_close(page)
 
-        # Log the failure
         timestamp = datetime.datetime.now().isoformat()
         if self.log_writer:
             self.log_writer.writerow([timestamp, request.url, response_code, "", "", "", "", "", ""])
             self.log_handle.flush()
 
     async def parse_page(self, response):
-        # --- progress indicator ---
-        # Remaining work ≈ requests enqueued so far minus responses we have received.
         stats = self.crawler.stats
-        enqueued  = stats.get_value("scheduler/enqueued", 0)
+        enq_sched = stats.get_value("scheduler/enqueued", 0)
+        deq_sched = stats.get_value("scheduler/dequeued", 0)
+        pending = max(enq_sched - deq_sched, 0)
+        active = sum(len(slot.active) for slot in self.crawler.engine.downloader.slots.values())
+        remaining = pending + active
         completed = stats.get_value("response_received_count", 0)
-        remaining = max(enqueued - completed, 0)
-
-        # Show how many requests are actively downloading right now
-        try:
-            active = sum(len(v) for v in self.crawler.engine.downloader.active.values())
-        except Exception:
-            active = 0
 
         print(
-            f"Remaining: {remaining}. "
-            f"Active: {active}. "
+            f"Remaining: {remaining} (pending: {pending}, active: {active}). "
             f"Downloaded: {completed}. "
             f"Processing URL: {response.request.url}"
         )
-        phase = response.meta.get("phase", 1)
-        current_depth = response.meta.get("depth", 0)
-        domain = self.domain1 if phase == 1 else self.domain2
-        # Skip if URL matches an exclude-path pattern
-        if self.should_exclude(response.request.url):
-            return
-
-        # Get the Playwright page reference
         page = response.meta.get("playwright_page")
-
         try:
-            collected_requests = []
-
-            async def _core_runner():
-                async for req in self._parse_core(response, phase, current_depth, domain, page):
-                    collected_requests.append(req)
-
-            await asyncio.wait_for(_core_runner(), timeout=120)  # whole parse timeout
-            # Yield any requests produced by _parse_core
-            for req in collected_requests:
+            async for req in self._parse_core(response):
                 yield req
-        except asyncio.TimeoutError:
-            self.logger.warning(f"Whole parse timed‑out (120 s) for {response.request.url}")
         except Exception as e:
-            self.logger.error(f"Unhandled error in parse_page for {response.request.url}: {e}")
+            self.logger.error(f"Unhandled error in parse_page for {response.request.url}: {e}", exc_info=True)
         finally:
-            # Log completion for debugging
             self.logger.info(f"Finished parse of {response.request.url}")
-            page = response.meta.get("playwright_page")
             if page:
                 await safe_close(page)
 
-    async def _parse_core(self, response, phase, current_depth, domain, page):
-        """
-        All the existing logic from parse_page is moved here so we can wrap it
-        with asyncio.wait_for in the outer method.
-        """
-        # --- BEGIN moved logic ---
-        # Check if the response content type is text-based
+    async def _parse_core(self, response):
+        phase = response.meta.get("phase", 1)
+        current_depth = response.meta.get("depth", 0)
+        domain = self.domain1 if phase == 1 else self.domain2
+        page = response.meta.get("playwright_page")
+
+        if self.should_exclude(response.request.url):
+            return
+
         content_type = response.headers.get('Content-Type', b'').decode('utf-8')
-        if not content_type.startswith('text'):
+        if not content_type.startswith(('text', 'application/xhtml+xml')):
             self.logger.error(f"Skipping non-text response: {response.request.url} (Content-Type: {content_type})")
             return
 
-        # Skip if language doesn’t match.
         if self.should_skip_page_due_to_language(response):
             return
 
-        # Deduplicate URL.
         if self.is_duplicate(response, phase):
             return
 
-        # Capture performance metrics.
         metrics = await self.capture_performance_metrics(response)
-        # Optional delay before capturing markup and text
         if self.delay_before_capture > 0:
             await asyncio.sleep(self.delay_before_capture)
 
-        # Remove unwanted selectors from the page before saving content
         if page:
             await self.remove_unwanted_selectors(page)
-            # Get content AFTER removing unwanted selectors
             html_content = await page.content()
-            self.save_html_content(html_content, response.request.url, domain)
-            # Use the cleaned HTML for markdown conversion as well
-            self.save_markdown_from_content(html_content, response.request.url, domain)
         else:
-            # For non-Playwright responses, we'll clean the HTML manually
             html_content = response.text
-            cleaned_html = self.apply_selector_removal_to_html(html_content)
-            self.save_html_content(cleaned_html, response.request.url, domain)
-            self.save_markdown_from_content(cleaned_html, response.request.url, domain)
 
-        # Retrieve messages stored via our injected init script.
+        self.save_html_content(html_content, response.request.url, domain)
+        await self.save_markdown_from_content(html_content, response.request.url, domain)
+
         console_messages = []
         if page:
             try:
@@ -417,14 +372,11 @@ class DualDomainSpider(scrapy.Spider):
             except Exception as e:
                 self.logger.error(f"Error retrieving console messages: {e}")
 
-        # Log the metrics along with the console messages.
         self.log_load_metrics(response.request.url, response.url, response.status, metrics, phase, console_messages, response)
 
-        # Process screenshot if enabled.
         if self.save_screenshots:
             await self.process_screenshot(response, domain)
 
-        # Schedule corresponding reference page when we're on the TEST site (phase 2).
         if phase == 2 and self.start_reference:
             relative_request = self.get_request_relative_url(response.request.url)
             abs_ref = urljoin(self.start_reference, relative_request)
@@ -437,15 +389,9 @@ class DualDomainSpider(scrapy.Spider):
                     dont_filter=True,
                 )
 
-        # Follow internal links **only** for the test site (phase 2).
         if phase == 2 and current_depth < self.crawl_depth:
-            if page:
-                html_content = await page.content()
-                for req in self.follow_internal_links(html_content, response, current_depth + 1):
-                    yield req
-            else:
-                for req in self.follow_internal_links(response.text, response, current_depth + 1):
-                    yield req
+            for req in self.follow_internal_links(html_content, response, current_depth + 1):
+                yield req
 
     async def capture_performance_metrics(self, response):
         metrics = {"ttfb": None, "dom_content_loaded": None, "load_event": None, "network_idle": None}
@@ -455,17 +401,15 @@ class DualDomainSpider(scrapy.Spider):
                 timing_json = await page.evaluate("() => JSON.stringify(window.performance.timing)")
                 timing = json.loads(timing_json)
                 nav_start = timing.get("navigationStart", 0)
-                metrics["ttfb"] = timing.get("responseStart", 0) - nav_start
-                metrics["dom_content_loaded"] = timing.get("domContentLoadedEventEnd", 0) - nav_start
-                metrics["load_event"] = timing.get("loadEventEnd", 0) - nav_start
+                if nav_start > 0:
+                    metrics["ttfb"] = timing.get("responseStart", 0) - nav_start
+                    metrics["dom_content_loaded"] = timing.get("domContentLoadedEventEnd", 0) - nav_start
+                    metrics["load_event"] = timing.get("loadEventEnd", 0) - nav_start
                 try:
-                    # Wait up to 60 seconds (60 000 ms) for network to go idle
                     await page.wait_for_load_state("networkidle", timeout=60_000)
+                    metrics["network_idle"] = await page.evaluate("() => performance.now()")
                 except Exception as e:
-                    self.logger.warning(
-                        f"Timed out after 60 s waiting for networkidle on {response.request.url}: {e}"
-                    )
-                metrics["network_idle"] = await page.evaluate("() => performance.now()")
+                    self.logger.warning(f"Timed out waiting for networkidle on {response.request.url}: {e}")
             except Exception as e:
                 self.logger.error(f"Error capturing performance metrics for {response.request.url}: {e}")
         return metrics
@@ -475,7 +419,6 @@ class DualDomainSpider(scrapy.Spider):
             self.logger.error(f"Empty response body for URL: {response.request.url}")
             return
 
-        links_followed = 0
         soup = BeautifulSoup(html_content, "html.parser")
         phase = response.meta.get("phase", 1)
 
@@ -483,40 +426,25 @@ class DualDomainSpider(scrapy.Spider):
             if self.link_in_excluded_section(link):
                 continue
             href = link.get("href")
-            if href.lower().startswith(("javascript:", "mailto:", "tel:")):
+            if not href or href.lower().startswith(("javascript:", "mailto:", "tel:")):
                 continue
+
             abs_url = response.urljoin(href)
-            if self.should_exclude(abs_url):
+
+            if self.should_exclude(abs_url) or not self.is_html_url(abs_url):
                 continue
-            if not self.is_html_url(abs_url):
-                continue
+
             if urlparse(abs_url).hostname != (self.domain1 if phase == 1 else self.domain2):
                 continue
 
-            # Check for duplicates BEFORE yielding new requests
-            duplicate_key = self.get_duplicate_key(abs_url)
-            count = self.seen_normalized[phase].get(duplicate_key, 0)
-
-            if self.limit_same_url_with_parameters > 0 and count >= self.limit_same_url_with_parameters:
-                self.logger.info(f"Skip scheduling duplicate URL: {duplicate_key} (count: {count})")
-                continue
-
-            # Update counter for this URL
-            self.seen_normalized[phase][duplicate_key] = count + 1
-
-            links_followed += 1
             yield scrapy.Request(
                 url=abs_url,
                 callback=self.parse_page,
-                meta={
-                    "playwright": True,
-                    "playwright_page_init_callback": init_page,
-                    **self.build_meta(
-                        phase=phase,
-                        depth=next_depth,
-                        auth=self.auth1 if phase == 1 else self.auth2
-                    )
-                },
+                meta=self.build_meta(
+                    phase=phase,
+                    depth=next_depth,
+                    auth=self.auth1 if phase == 1 else self.auth2
+                ),
                 errback=self.errback,
             )
 
@@ -527,74 +455,45 @@ class DualDomainSpider(scrapy.Spider):
         )
         return not any(urlparse(url).path.lower().endswith(ext) for ext in non_html_ext)
 
-    def save_html(self, response, domain):
-        """Legacy method maintained for compatibility"""
-        cleaned_html = self.apply_selector_removal_to_html(response.text)
-        file_path = self.get_output_filepath(domain, response.request.url, "html", ".html")
-        self.write_file(file_path, cleaned_html, binary=False)
-
     def save_html_content(self, html_content, url, domain):
-        """
-        Save raw HTML text that we already fetched from a Playwright page.
-        """
         file_path = self.get_output_filepath(domain, url, "html", ".html")
         self.write_file(file_path, html_content, binary=False)
 
-    def apply_selector_removal_to_html(self, html_content):
-        """Apply selector removal using BeautifulSoup for non-Playwright content"""
-        if not self.remove_selectors:
-            return html_content
-            
-        soup = BeautifulSoup(html_content, "html.parser")
-        for selector in self.remove_selectors:
-            for element in soup.select(selector):
-                element.decompose()
-        return str(soup)
-
     def clean_html(self, html):
-        """Clean HTML for text extraction, removing scripts, styles, and images"""
+        t0 = time.perf_counter()
         soup = BeautifulSoup(html, "html.parser")
-        
-        # First apply custom selector removal
         for selector in self.remove_selectors:
             for element in soup.select(selector):
                 element.decompose()
-                
-        # Then do standard cleanup
         for tag in soup.find_all(['script', 'style', 'img']):
             tag.decompose()
-        # Unwrap all <div> elements (in case of nested wrappers)
         for tag in soup.find_all('div'):
             tag.unwrap()
         for tag in soup.find_all():
             tag.attrs = {}
+        self.logger.info(f"TIMING ▸ clean_html parsed {len(html)} bytes in {time.perf_counter() - t0:.3f}s")
         return str(soup)
 
-    def save_markdown(self, response, domain):
-        """Legacy method maintained for compatibility"""
-        cleaned_html = self.clean_html(response.text)
-        self.save_markdown_from_content(cleaned_html, response.request.url, domain)
-
-    def save_markdown_from_content(self, html_content, url, domain):
+    async def save_markdown_from_content(self, html_content, url, domain):
         file_path = self.get_output_filepath(domain, url, "text", ".md")
+        start_time = time.perf_counter()
         try:
-            cleaned_html = self.clean_html(html_content)
-            markdown_text = pypandoc.convert_text(cleaned_html, 'md', format='html')
+            cleaned_html = await asyncio.to_thread(self.clean_html, html_content)
+            markdown_text = await asyncio.to_thread(pypandoc.convert_text, cleaned_html, 'md', format='html')
             markdown_text = re.sub(r'</?div>', '', markdown_text)
         except Exception as e:
             self.logger.error(f"Pandoc conversion failed for {url}: {e}")
             markdown_text = "Conversion failed."
-        self.write_file(file_path, markdown_text, binary=False)
+        elapsed = time.perf_counter() - start_time
+        self.logger.info(f"TIMING ▸ Pandoc conversion for {url} took {elapsed:.3f}s")
+        await asyncio.to_thread(self.write_file, file_path, markdown_text, binary=False)
 
     async def remove_unwanted_selectors(self, page):
-        """Remove CSS selectors specified in self.remove_selectors from the page."""
         for sel in self.remove_selectors:
             try:
-                # First count the elements to remove
                 count = await page.evaluate(f"() => document.querySelectorAll('{sel}').length")
                 if count > 0:
                     self.logger.info(f"Removing {count} elements matching selector: {sel}")
-                    # Then remove them
                     await page.evaluate(
                         f"""() => {{
                             document.querySelectorAll('{sel}').forEach(e => e.remove());
@@ -611,15 +510,25 @@ class DualDomainSpider(scrapy.Spider):
             self.logger.error("No playwright_page in meta for screenshot!")
             return
         file_path = self.get_output_filepath(domain, response.request.url, "screenshots", ".png")
-        await page.screenshot(path=file_path, full_page=True)
-        self.logger.info(f"Saved screenshot: {file_path}")
-        # Remove the call to page.close() here. The page will be closed in parse_page.
-        
+        try:
+            screenshot_bytes = await page.screenshot(full_page=True)
+            await asyncio.to_thread(self.write_file, file_path, screenshot_bytes, binary=True)
+            self.logger.info(f"Saved screenshot: {file_path}")
+        except Exception as e:
+            self.logger.error(f"Failed to take screenshot for {response.request.url}: {e}")
+
     def write_file(self, file_path, data, binary=False):
+        t0 = time.perf_counter()
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         mode = "wb" if binary else "w"
-        with open(file_path, mode, encoding=None if binary else "utf-8") as f:
-            f.write(data)
+        encoding = None if binary else "utf-8"
+        try:
+            with open(file_path, mode, encoding=encoding) as f:
+                f.write(data)
+            bytes_written = len(data)
+            self.logger.info(f"TIMING ▸ write_file wrote {os.path.basename(file_path)} ({bytes_written} bytes) in {time.perf_counter() - t0:.3f}s")
+        except Exception as e:
+            self.logger.error(f"Failed to write file {file_path}: {e}")
 
     def log_load_metrics(self, url_request, url_final, response_code, metrics, phase, console_messages, response):
         if self.log_writer:
@@ -630,18 +539,14 @@ class DualDomainSpider(scrapy.Spider):
             network_idle = round(metrics.get("network_idle", 0)) if metrics.get("network_idle") is not None else 0
             db_config = self.reference_db_config if phase == 1 else self.test_db_config
 
-            # Create a list with the request URL, any redirect URLs, and the final URL.
             urls_to_check = [url_request] + response.meta.get('redirect_urls', []) + [url_final]
             watchdog_errors = self.get_watchdog_errors(urls_to_check, db_config)
 
-            # Only include the final URL if it differs from the request URL.
             final_url_to_print = url_final if url_final.rstrip("/") != url_request.rstrip("/") else ""
 
-            # Sanitize messages by replacing newlines and excessive whitespace
             console_messages_str = " | ".join([f"{msg['type']}: {msg['text']}" for msg in console_messages])
-            watchdog_errors = " ".join(watchdog_errors.splitlines())  # Flatten multi-line logs
+            watchdog_errors = " ".join(watchdog_errors.splitlines())
 
-            # Extract caching headers safely
             headers = response.headers
             age = headers.get("Age", b"").decode("utf-8")
             cache_control = headers.get("Cache-Control", b"").decode("utf-8")
@@ -679,12 +584,9 @@ class DualDomainSpider(scrapy.Spider):
     def get_watchdog_errors(self, urls, db_config):
         if not db_config:
             return "No DB Config"
-
-        # Ensure urls is a list
         if not isinstance(urls, list):
             urls = [urls]
 
-        # Build a dynamic WHERE clause for each URL.
         conditions = []
         params = []
         for u in urls:
@@ -723,8 +625,11 @@ class DualDomainSpider(scrapy.Spider):
                 variables = log['variables']
                 log_type = log['type']
                 if variables:
-                    decoded_vars = phpserialize.loads(variables, decode_strings=True, object_hook=self.ignore_php_objects)
-                    message = self.replace_placeholders(message, decoded_vars)
+                    try:
+                        decoded_vars = phpserialize.loads(variables, decode_strings=True, object_hook=self.ignore_php_objects)
+                        message = self.replace_placeholders(message, decoded_vars)
+                    except Exception:
+                        pass
                 combined_logs.append(f"{log['timestamp']} [{log_type}]: {message}")
 
             return " | ".join(combined_logs) if combined_logs else "No errors"
@@ -733,24 +638,7 @@ class DualDomainSpider(scrapy.Spider):
             return "Error fetching logs"
 
     def ignore_php_objects(self, class_name, obj_dict):
-        """Ignore PHP objects when deserializing."""
         return "[Ignored PHP Object]"
-
-    def safe_deserialize(self, variables):
-        """Safely deserialize PHP serialized data while ignoring objects."""
-        try:
-            # Ensure variables are bytes before deserializing
-            if isinstance(variables, str):
-                variables = variables.encode("utf-8")
-
-            # Deserialize with object_hook to ignore PHP objects
-            decoded_vars = phpserialize.loads(variables, decode_strings=True, object_hook=ignore_php_objects)
-
-            # Convert all values to strings
-            return {key: str(value) for key, value in decoded_vars.items()}
-        except (UnicodeEncodeError, ValueError, Exception) as e:
-            self.logger.error(f"Error deserializing variables: {e}")
-            return {}
 
     def replace_placeholders(self, message, variables):
         return re.sub(r'(@\w+|%\w+)', lambda match: str(variables.get(match.group(0), match.group(0))), message)
@@ -762,9 +650,7 @@ class DualDomainSpider(scrapy.Spider):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="Dual domain crawler with comparison functionality."
-    )
+    parser = argparse.ArgumentParser(description="Dual domain crawler with comparison functionality.")
     parser.add_argument("--reference", help="Starting URL for domain 1.")
     parser.add_argument("--test", required=True, help="Starting URL for domain 2.")
     parser.add_argument("--depth", type=int, default=4, help="Crawl depth.")
@@ -773,24 +659,27 @@ if __name__ == "__main__":
     parser.add_argument("--remove-selectors", default="", help="Comma-separated list of CSS selectors to remove before screenshot.")
     parser.add_argument("--reference-db", default="", help="MySQL connection string for the reference site (mysql://user:pass@host:port/dbname)")
     parser.add_argument("--test-db", default="", help="MySQL connection string for the test site (mysql://user:pass@host:port/dbname)")
-    parser.add_argument("--limit-same-url-with-parameters", type=int, default=0,
-                        help="Limit how many different requests to the same URL (including query parameters) are allowed.")
-    parser.add_argument("--delay-before-capture", type=float, default=0,
-                        help="Delay in seconds before capturing markup, text, and screenshots.")
-    parser.add_argument("--concurrent-requests", dest="concurrent_requests",
-                        type=int, default=8,
-                        help="Maximum concurrent requests Scrapy should perform (Scrapy setting CONCURRENT_REQUESTS).")
-    parser.add_argument("--exclude-paths", default="",
-                        help="Comma-separated list of regex patterns; any URL matching a pattern will be skipped.")
-    parser.add_argument("--exclude-links-inside-classes", dest="exclude_links_inside_classes", default="",
-                        help=("Comma-separated CSS class names; any <a> tag that is "
-                              "inside an element with one of these classes will be skipped."))
-    args = parser.parse_args()
-    # Ensure the attribute exists even if parser failed to create it for some reason
-    if not hasattr(args, "exclude_links_inside_classes"):
-        setattr(args, "exclude_links_inside_classes", "")
+    parser.add_argument("--limit-same-url-with-parameters", type=int, default=0, help="Limit how many different requests to the same URL (sharing the same path) are allowed.")
+    parser.add_argument("--delay-before-capture", type=float, default=0, help="Delay in seconds before capturing markup, text, and screenshots.")
+    parser.add_argument("--concurrent-requests", dest="concurrent_requests", type=int, default=8, help="Maximum concurrent requests Scrapy should perform (Scrapy setting CONCURRENT_REQUESTS).")
+    parser.add_argument("--exclude-paths", default="", help="Comma-separated list of regex patterns; any URL matching a pattern will be skipped.")
+    parser.add_argument("--exclude-links-inside-classes", dest="exclude_links_inside_classes", default="", help=("Comma-separated CSS class names; any <a> tag that is inside an element with one of these classes will be skipped."))
 
-    process = CrawlerProcess(settings={"CONCURRENT_REQUESTS": args.concurrent_requests})
+    args = parser.parse_args()
+
+    # ## FIX: Dynamically configure settings before initializing the CrawlerProcess.
+    # This is the correct way to handle settings that depend on command-line arguments.
+    concurrency = args.concurrent_requests
+    process_settings = {
+        "CONCURRENT_REQUESTS": concurrency,
+        "PLAYWRIGHT_CONTEXTS": {
+            f"context-{i}": {
+                "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+            } for i in range(concurrency)
+        }
+    }
+
+    process = CrawlerProcess(settings=process_settings)
     process.crawl(
         DualDomainSpider,
         crawl_depth=args.depth,
