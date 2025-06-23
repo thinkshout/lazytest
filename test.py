@@ -7,6 +7,7 @@ import hashlib
 import pymysql
 import phpserialize
 import asyncio
+from playwright._impl._errors import TargetClosedError  # optional, for logging
 
 from urllib.parse import urlparse, urljoin
 import scrapy
@@ -21,7 +22,15 @@ from bs4 import BeautifulSoup  # For cleaning HTML and checking language
 import logging
 logging.getLogger("pypandoc").setLevel(logging.WARNING)
 
-@staticmethod
+# Add safe_close helper function
+async def safe_close(page):
+    try:
+        await page.close()
+    except Exception as e:
+        # Optionally log the error if needed.
+        # For example: print(f"safe_close error: {e}")
+        pass
+
 async def block_unwanted_resources(route, request):
     if request.resource_type not in {"document", "script"}:
         await route.abort()
@@ -294,10 +303,10 @@ class DualDomainSpider(scrapy.Spider):
 
         self.logger.error(f"Request failed: {request.url}. Response code: {response_code}")
 
-        # Get Playwright page from meta
+        # Use safe_close instead of direct page.close
         page = request.meta.get("playwright_page")
         if page:
-            asyncio.create_task(page.close())  # Close the page asynchronously
+            asyncio.create_task(safe_close(page))
 
         # Log the failure
         timestamp = datetime.datetime.now().isoformat()
@@ -306,7 +315,25 @@ class DualDomainSpider(scrapy.Spider):
             self.log_handle.flush()
 
     async def parse_page(self, response):
-        print(f"Queue: {len(self.crawler.engine.slot.scheduler)}. Downloaded: {self.crawler.stats.get_value('response_received_count', 0)}. Processing URL: {response.request.url}")
+        # --- progress indicator ---
+        # Remaining work ≈ requests enqueued so far minus responses we have received.
+        stats = self.crawler.stats
+        enqueued  = stats.get_value("scheduler/enqueued", 0)
+        completed = stats.get_value("response_received_count", 0)
+        remaining = max(enqueued - completed, 0)
+
+        # Show how many requests are actively downloading right now
+        try:
+            active = sum(len(v) for v in self.crawler.engine.downloader.active.values())
+        except Exception:
+            active = 0
+
+        print(
+            f"Remaining: {remaining}. "
+            f"Active: {active}. "
+            f"Downloaded: {completed}. "
+            f"Processing URL: {response.request.url}"
+        )
         phase = response.meta.get("phase", 1)
         current_depth = response.meta.get("depth", 0)
         domain = self.domain1 if phase == 1 else self.domain2
@@ -335,9 +362,9 @@ class DualDomainSpider(scrapy.Spider):
         finally:
             # Log completion for debugging
             self.logger.info(f"Finished parse of {response.request.url}")
-            # Ensure the Playwright page is closed to avoid resource leaks
+            page = response.meta.get("playwright_page")
             if page:
-                await page.close()
+                await safe_close(page)
 
     async def _parse_core(self, response, phase, current_depth, domain, page):
         """
@@ -583,12 +610,11 @@ class DualDomainSpider(scrapy.Spider):
         if not page:
             self.logger.error("No playwright_page in meta for screenshot!")
             return
-        # Remove unwanted selectors is already called earlier in the process
         file_path = self.get_output_filepath(domain, response.request.url, "screenshots", ".png")
         await page.screenshot(path=file_path, full_page=True)
         self.logger.info(f"Saved screenshot: {file_path}")
-        await page.close()
-
+        # Remove the call to page.close() here. The page will be closed in parse_page.
+        
     def write_file(self, file_path, data, binary=False):
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         mode = "wb" if binary else "w"
@@ -781,4 +807,3 @@ if __name__ == "__main__":
         exclude_links_inside_classes=getattr(args, "exclude_links_inside_classes", "")
     )
     process.start()
-
