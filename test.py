@@ -118,7 +118,7 @@ class DualDomainSpider(scrapy.Spider):
             c.strip() for c in exclude_links_inside_classes.split(",") if c.strip()
         ]
 
-        self.seen_normalized = {1: {}, 2: {}}
+        self.seen_paths = {1: {}, 2: {}}
         self.limit_same_url_with_parameters = int(limit_same_url_with_parameters)
         self.delay_before_capture = float(delay_before_capture)
 
@@ -134,7 +134,6 @@ class DualDomainSpider(scrapy.Spider):
         self.log_handle = None
         self.log_writer = None
 
-        # ## FIX: Initialize context_pool to None. It will be set in from_crawler.
         self.context_pool = None
 
     def create_output_dirs(self):
@@ -147,13 +146,10 @@ class DualDomainSpider(scrapy.Spider):
 
     @classmethod
     def from_crawler(cls, crawler, *args, **kwargs):
-        # ## FIX: This is the correct place for settings-dependent initialization.
-        # `super().from_crawler` creates the spider instance and attaches the settings.
         spider = super().from_crawler(crawler, *args, **kwargs)
         crawler.signals.connect(spider.spider_opened, signal=signals.spider_opened)
         crawler.signals.connect(spider.spider_closed, signal=signals.spider_closed)
 
-        # Now `spider.settings` is available. We can set up the context pool.
         concurrency = spider.settings.getint("CONCURRENT_REQUESTS", 8)
         spider.context_pool = cycle([f"context-{i}" for i in range(concurrency)])
 
@@ -194,8 +190,6 @@ class DualDomainSpider(scrapy.Spider):
             "spider": self,
             "playwright_context": next(self.context_pool),
         }
-        # Note: http_credentials should be set on the context, not the request.
-        # This implementation assumes the context is pre-configured with auth if needed.
         return meta
 
     def get_domain_folder(self, domain):
@@ -229,9 +223,9 @@ class DualDomainSpider(scrapy.Spider):
             relative += "?" + parsed.query
         return relative
 
-    def normalize_url(self, url):
+    def get_path_key(self, url):
         parsed = urlparse(url)
-        return parsed.geturl()
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
     def should_skip_page_due_to_language(self, response):
         if self.target_lang:
@@ -259,25 +253,14 @@ class DualDomainSpider(scrapy.Spider):
                 return True
         return False
 
-    def get_duplicate_path_key(self, url):
-        parsed = urlparse(url)
-        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-
-    def is_duplicate(self, response, phase):
-        key = self.get_duplicate_path_key(response.request.url)
-        count = self.seen_normalized[phase].get(key, 0)
-
-        if self.limit_same_url_with_parameters > 0 and count >= self.limit_same_url_with_parameters:
-            self.logger.info(f"Skipping duplicate path in phase {phase} URL: {key} (limit {self.limit_same_url_with_parameters} reached)")
-            return True
-
-        self.seen_normalized[phase][key] = count + 1
-        return False
-
-    def start_requests(self):
+    async def start(self):
         if self.should_exclude(self.test):
             self.logger.info(f"Skipping excluded start URL: {self.test}")
             return
+
+        path_key = self.get_path_key(self.test)
+        self.seen_paths[2][path_key] = 1
+
         yield scrapy.Request(
             url=self.test,
             callback=self.parse_page,
@@ -285,16 +268,21 @@ class DualDomainSpider(scrapy.Spider):
             errback=self.errback,
         )
 
+    # ### CHANGED: Enhanced errback for more context ###
     async def errback(self, failure):
         request = failure.request
         response_code = "N/A"
+        depth = request.meta.get('depth', 'N/A')
+        referrer = request.headers.get('Referer', b'N/A').decode('utf-8')
+        error_type = type(failure.value).__name__
 
         if hasattr(failure.value, 'response'):
             response_code = getattr(failure.value.response, "status", "N/A")
-        elif isinstance(failure.value, TimeoutError):
-            self.logger.error(f"Request timed out: {request.url}")
 
-        self.logger.error(f"Request failed: {request.url}. Response code: {response_code}")
+        self.logger.error(
+            f"Request failed for {request.url} (depth: {depth}, referrer: {referrer}) "
+            f"- Error: {error_type}, Status: {response_code}"
+        )
 
         page = request.meta.get("playwright_page")
         if page:
@@ -302,7 +290,12 @@ class DualDomainSpider(scrapy.Spider):
 
         timestamp = datetime.datetime.now().isoformat()
         if self.log_writer:
-            self.log_writer.writerow([timestamp, request.url, response_code, "", "", "", "", "", ""])
+            # Log failure to CSV for easier analysis
+            self.log_writer.writerow([
+                timestamp, request.url, f"Failed: {error_type}", response_code,
+                "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+                f"Referrer: {referrer}", ""
+            ])
             self.log_handle.flush()
 
     async def parse_page(self, response):
@@ -314,11 +307,12 @@ class DualDomainSpider(scrapy.Spider):
         remaining = pending + active
         completed = stats.get_value("response_received_count", 0)
 
-        print(
-            f"Remaining: {remaining} (pending: {pending}, active: {active}). "
-            f"Downloaded: {completed}. "
-            f"Processing URL: {response.request.url}"
+        self.logger.info( # CHANGED: Changed print() to self.logger.info for better log integration
+            f"Remaining: {remaining} (pending: {pending}, active: {active}) | "
+            f"Completed: {completed} | "
+            f"Processing: {response.request.url}"
         )
+
         page = response.meta.get("playwright_page")
         try:
             async for req in self._parse_core(response):
@@ -326,7 +320,7 @@ class DualDomainSpider(scrapy.Spider):
         except Exception as e:
             self.logger.error(f"Unhandled error in parse_page for {response.request.url}: {e}", exc_info=True)
         finally:
-            self.logger.info(f"Finished parse of {response.request.url}")
+            self.logger.debug(f"Finished parse of {response.request.url}") # CHANGED: Lowered to DEBUG
             if page:
                 await safe_close(page)
 
@@ -341,13 +335,10 @@ class DualDomainSpider(scrapy.Spider):
 
         content_type = response.headers.get('Content-Type', b'').decode('utf-8')
         if not content_type.startswith(('text', 'application/xhtml+xml')):
-            self.logger.error(f"Skipping non-text response: {response.request.url} (Content-Type: {content_type})")
+            self.logger.warning(f"Skipping non-text response: {response.request.url} (Content-Type: {content_type})") # CHANGED: Warning is more appropriate than error
             return
 
         if self.should_skip_page_due_to_language(response):
-            return
-
-        if self.is_duplicate(response, phase):
             return
 
         metrics = await self.capture_performance_metrics(response)
@@ -368,7 +359,7 @@ class DualDomainSpider(scrapy.Spider):
             try:
                 console_messages = await page.evaluate("() => window.__consoleMessages || []")
                 if console_messages:
-                    self.logger.info(f"Console messages: {console_messages}")
+                    self.logger.debug(f"Console messages on {response.url}: {console_messages}") # CHANGED: Lowered to DEBUG to reduce noise
             except Exception as e:
                 self.logger.error(f"Error retrieving console messages: {e}")
 
@@ -416,7 +407,7 @@ class DualDomainSpider(scrapy.Spider):
 
     def follow_internal_links(self, html_content, response, next_depth):
         if not html_content.strip():
-            self.logger.error(f"Empty response body for URL: {response.request.url}")
+            self.logger.warning(f"Empty response body for URL: {response.request.url}") # CHANGED: Warning more appropriate
             return
 
         soup = BeautifulSoup(html_content, "html.parser")
@@ -436,6 +427,16 @@ class DualDomainSpider(scrapy.Spider):
 
             if urlparse(abs_url).hostname != (self.domain1 if phase == 1 else self.domain2):
                 continue
+
+            path_key = self.get_path_key(abs_url)
+            count = self.seen_paths[phase].get(path_key, 0)
+
+            if self.limit_same_url_with_parameters > 0 and count >= self.limit_same_url_with_parameters:
+                # ### CHANGED: Lowered log level from INFO to DEBUG to reduce log noise ###
+                self.logger.debug(f"Path limit reached for {path_key}, skipping URL: {abs_url}")
+                continue
+
+            self.seen_paths[phase][path_key] = count + 1
 
             yield scrapy.Request(
                 url=abs_url,
@@ -460,7 +461,6 @@ class DualDomainSpider(scrapy.Spider):
         self.write_file(file_path, html_content, binary=False)
 
     def clean_html(self, html):
-        t0 = time.perf_counter()
         soup = BeautifulSoup(html, "html.parser")
         for selector in self.remove_selectors:
             for element in soup.select(selector):
@@ -471,7 +471,6 @@ class DualDomainSpider(scrapy.Spider):
             tag.unwrap()
         for tag in soup.find_all():
             tag.attrs = {}
-        self.logger.info(f"TIMING ▸ clean_html parsed {len(html)} bytes in {time.perf_counter() - t0:.3f}s")
         return str(soup)
 
     async def save_markdown_from_content(self, html_content, url, domain):
@@ -485,7 +484,7 @@ class DualDomainSpider(scrapy.Spider):
             self.logger.error(f"Pandoc conversion failed for {url}: {e}")
             markdown_text = "Conversion failed."
         elapsed = time.perf_counter() - start_time
-        self.logger.info(f"TIMING ▸ Pandoc conversion for {url} took {elapsed:.3f}s")
+        self.logger.debug(f"Pandoc conversion for {url} took {elapsed:.3f}s") # CHANGED: Lowered to DEBUG
         await asyncio.to_thread(self.write_file, file_path, markdown_text, binary=False)
 
     async def remove_unwanted_selectors(self, page):
@@ -518,24 +517,21 @@ class DualDomainSpider(scrapy.Spider):
             self.logger.error(f"Failed to take screenshot for {response.request.url}: {e}")
 
     def write_file(self, file_path, data, binary=False):
-        t0 = time.perf_counter()
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         mode = "wb" if binary else "w"
         encoding = None if binary else "utf-8"
         try:
             with open(file_path, mode, encoding=encoding) as f:
                 f.write(data)
-            bytes_written = len(data)
-            self.logger.info(f"TIMING ▸ write_file wrote {os.path.basename(file_path)} ({bytes_written} bytes) in {time.perf_counter() - t0:.3f}s")
         except Exception as e:
             self.logger.error(f"Failed to write file {file_path}: {e}")
 
     def log_load_metrics(self, url_request, url_final, response_code, metrics, phase, console_messages, response):
         if self.log_writer:
             timestamp = datetime.datetime.now().isoformat()
-            ttfb = round(metrics.get("ttfb", 0))
-            dcl = round(metrics.get("dom_content_loaded", 0))
-            load_evt = round(metrics.get("load_event", 0))
+            ttfb = round(metrics.get("ttfb", 0)) if metrics.get("ttfb") is not None else 0
+            dcl = round(metrics.get("dom_content_loaded", 0)) if metrics.get("dom_content_loaded") is not None else 0
+            load_evt = round(metrics.get("load_event", 0)) if metrics.get("load_event") is not None else 0
             network_idle = round(metrics.get("network_idle", 0)) if metrics.get("network_idle") is not None else 0
             db_config = self.reference_db_config if phase == 1 else self.test_db_config
 
@@ -667,8 +663,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # ## FIX: Dynamically configure settings before initializing the CrawlerProcess.
-    # This is the correct way to handle settings that depend on command-line arguments.
     concurrency = args.concurrent_requests
     process_settings = {
         "CONCURRENT_REQUESTS": concurrency,
