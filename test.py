@@ -70,6 +70,7 @@ class DualDomainSpider(scrapy.Spider):
                 "--disable-font-subpixel-positioning",
                 "--disable-gpu",
                 "--disable-gpu-rasterization",
+                "--blink-settings=imageAnimationPolicy=none",
             ],
         },
         "ROBOTSTXT_OBEY": False,
@@ -253,7 +254,7 @@ class DualDomainSpider(scrapy.Spider):
                 return True
         return False
 
-    async def start(self):
+    def start_requests(self):
         if self.should_exclude(self.test):
             self.logger.info(f"Skipping excluded start URL: {self.test}")
             return
@@ -501,6 +502,68 @@ class DualDomainSpider(scrapy.Spider):
             except Exception as e:
                 self.logger.error(f"Error removing selector '{sel}': {e}")
 
+    async def force_load_lazy_images(self, page):
+        """Best-effort: convert common lazy‑load patterns into eagerly loaded images and scroll through the page."""
+        try:
+            await page.evaluate(
+                """() => {
+                    const imgs = Array.from(document.querySelectorAll('img'));
+                    for (const img of imgs) {
+                        // Standard loading=lazy API
+                        if (img.loading === 'lazy') {
+                            img.loading = 'eager';
+                        }
+                        const ds = img.dataset || {};
+                        // Popular lazy-load conventions
+                        if (ds.src && (!img.src || img.src === window.location.href)) {
+                            img.src = ds.src;
+                        }
+                        if (ds.srcset && !img.srcset) {
+                            img.srcset = ds.srcset;
+                        }
+                        if (ds.lazySrc && (!img.src || img.src === window.location.href)) {
+                            img.src = ds.lazySrc;
+                        }
+                        if (ds.lazySrcset && !img.srcset) {
+                            img.srcset = ds.lazySrcset;
+                        }
+                    }
+                }"""
+            )
+        except Exception as e:
+            self.logger.warning(f"Error normalizing lazy images before scroll: {e}")
+
+        # Scroll down the page to trigger any IntersectionObserver/viewport-based lazy loaders.
+        try:
+            scroll_height = await page.evaluate(
+                "() => Math.max(document.body.scrollHeight || 0, document.documentElement.scrollHeight || 0)"
+            )
+            viewport = page.viewport_size or {}
+            vh = viewport.get("height", 800) or 800
+            step = max(int(vh / 2), 200)
+
+            current = 0
+            while current < scroll_height:
+                await page.evaluate(f"window.scrollTo(0, {current});")
+                await asyncio.sleep(0.2)
+                current += step
+
+            # Return to top so screenshots are consistent.
+            await page.evaluate("window.scrollTo(0, 0);")
+        except Exception as e:
+            self.logger.warning(f"Error while scrolling to load lazy images: {e}")
+
+    async def wait_for_iframes_loaded(self, page, timeout_per_frame=10000):
+        """Wait for all iframes (and the main frame) to reach load state before screenshot."""
+        try:
+            for i, frame in enumerate(page.frames):
+                try:
+                    await frame.wait_for_load_state("load", timeout=timeout_per_frame)
+                except Exception as e:
+                    self.logger.warning(f"Frame {i} did not reach load state within {timeout_per_frame}ms: {e}")
+        except Exception as e:
+            self.logger.warning(f"Error waiting for iframes: {e}")
+
     async def process_screenshot(self, response, domain):
         page = response.meta.get("playwright_page")
         if self.delay_before_capture > 0:
@@ -510,6 +573,8 @@ class DualDomainSpider(scrapy.Spider):
             return
         file_path = self.get_output_filepath(domain, response.request.url, "screenshots", ".png")
         try:
+            await self.force_load_lazy_images(page)
+            await self.wait_for_iframes_loaded(page)
             screenshot_bytes = await page.screenshot(full_page=True)
             await asyncio.to_thread(self.write_file, file_path, screenshot_bytes, binary=True)
             self.logger.info(f"Saved screenshot: {file_path}")
@@ -542,6 +607,18 @@ class DualDomainSpider(scrapy.Spider):
 
             console_messages_str = " | ".join([f"{msg['type']}: {msg['text']}" for msg in console_messages])
             watchdog_errors = " ".join(watchdog_errors.splitlines())
+
+            # Prevent extremely large cells that break tools like Google Sheets
+            def _truncate_cell(value, max_len=30000):
+                if value is None:
+                    return ""
+                value = str(value)
+                if len(value) <= max_len:
+                    return value
+                return value[: max_len - 15] + " [TRUNCATED]"
+
+            console_messages_str = _truncate_cell(console_messages_str)
+            watchdog_errors = _truncate_cell(watchdog_errors)
 
             headers = response.headers
             age = headers.get("Age", b"").decode("utf-8")

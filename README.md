@@ -47,7 +47,7 @@ Just a test site (no reference):
 `diff -r output/text/test output/text/reference`
 
 ## Run screenshot diffs with
-`npx reg-cli output/screenshots/test output/screenshots/reference output/screenshots/diff -R output/screenshots/diff.html`
+`npx reg-cli output/screenshots/test output/screenshots/reference output/screenshots/diff -R output/screenshots/diff.html --enableAntialias`
 
 ## Todo/Ideas
 * Add cache hits/misses to log
